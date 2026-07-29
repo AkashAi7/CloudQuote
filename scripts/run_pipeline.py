@@ -1,10 +1,28 @@
 import argparse
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from build_workbook import build_workbook
-from parse_inputs import normalize_inputs
+
+def _run_fingerprint(specs_path: Path, aws_boq_path: Path, region: str, currency: str, scenario: str) -> str:
+  digest = hashlib.sha256()
+  digest.update(json.dumps({
+    "region": region,
+    "currency": currency,
+    "scenario": scenario,
+  }, sort_keys=True).encode("utf-8"))
+  project_root = Path(__file__).resolve().parent.parent
+  dependencies = [
+    specs_path,
+    aws_boq_path,
+    *sorted((project_root / "scripts").glob("*.py")),
+    *sorted((project_root / "mappings").glob("*.yaml")),
+  ]
+  for path in dependencies:
+    digest.update(str(path.resolve()).encode("utf-8"))
+    digest.update(path.read_bytes())
+  return digest.hexdigest()
 
 
 def _render_executive_summary(summary: dict) -> str:
@@ -88,6 +106,30 @@ def main() -> None:
   out_path = Path(args.output)
   out_path.parent.mkdir(parents=True, exist_ok=True)
   normalized_path = out_path.parent / "normalized.json"
+  summary_path = out_path.parent / "summary.json"
+  executive_summary_path = out_path.parent / "executive_summary.md"
+  manifest_path = out_path.parent / ".cloudquote-run.json"
+  fingerprint = _run_fingerprint(
+    Path(args.specs),
+    Path(args.aws_boq),
+    args.region,
+    args.currency,
+    args.scenario,
+  )
+  artifacts = {
+    "workbook": str(out_path),
+    "normalized": str(normalized_path),
+    "summary": str(summary_path),
+    "executiveSummary": str(executive_summary_path),
+  }
+  if manifest_path.exists() and all(Path(path).exists() for path in artifacts.values()):
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("fingerprint") == fingerprint:
+      print(json.dumps({**artifacts, "reused": True}, indent=2))
+      return
+
+  from build_workbook import build_workbook
+  from parse_inputs import normalize_inputs
 
   normalized = normalize_inputs(Path(args.specs), Path(args.aws_boq), normalized_path)
 
@@ -99,16 +141,10 @@ def main() -> None:
     scenario=args.scenario,
   )
 
-  summary_path = out_path.parent / "summary.json"
   summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-  executive_summary_path = out_path.parent / "executive_summary.md"
   executive_summary_path.write_text(_render_executive_summary(summary), encoding="utf-8")
-  print(json.dumps({
-    "workbook": str(out_path),
-    "normalized": str(normalized_path),
-    "summary": str(summary_path),
-    "executiveSummary": str(executive_summary_path),
-  }, indent=2))
+  manifest_path.write_text(json.dumps({"fingerprint": fingerprint}, indent=2), encoding="utf-8")
+  print(json.dumps({**artifacts, "reused": False}, indent=2))
 
 
 if __name__ == "__main__":

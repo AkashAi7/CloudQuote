@@ -15,6 +15,7 @@ pricing_cache.json
 normalized.json
 summary.json
 executive_summary.md
+.cloudquote-run.json
 
 # Local agent tooling
 .agents/

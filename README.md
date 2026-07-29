@@ -6,7 +6,13 @@ The repository is intentionally provider-neutral so future workflows can generat
 
 ## Copilot usage
 
-Open this repository in a GitHub Copilot coding agent environment and select the `azure-boq` custom agent, or run the `azure-boq` prompt from `.github/prompts/azure-boq.prompt.md`.
+Open this repository in a GitHub Copilot coding agent environment and select the `cloudquote` custom agent, or run the `cloudquote` prompt from `.github/prompts/cloudquote.prompt.md`.
+
+The workflow is skill-driven:
+
+- `cloudquote-boq` orchestrates input interpretation, mapping, and artifact generation.
+- `cloudquote-pricing-guardrails` blocks unsupported unit conversions.
+- `cloudquote-artifact-delivery` returns only the completed output files.
 
 Provide:
 
@@ -44,6 +50,8 @@ python scripts\run_pipeline.py `
 ```
 
 `--output` must be an `.xlsx` file path. The JSON and Markdown summaries are written beside it.
+
+Unchanged inputs and options reuse the existing artifacts through a content fingerprint, avoiding repeated parsing, pricing, and workbook generation.
 
 ## Pricing safety
 
