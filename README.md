@@ -1,6 +1,8 @@
-# AWS to Azure BOQ Copilot
+# BOQ
 
-Generate an Azure bill of quantities from customer requirements and an AWS BOQ. The project maps services, resolves regional Azure retail prices, compares pricing scenarios, and creates an Excel workbook plus machine-readable and chat-ready summaries.
+BOQ is a provider-extensible bill-of-quantities workspace for GitHub Copilot. The currently implemented workflow converts customer requirements and an AWS BOQ into an Azure BOQ with regional pricing, scenario comparisons, an Excel workbook, and machine-readable and chat-ready summaries.
+
+The repository is intentionally provider-neutral so future workflows can generate and compare AWS, Azure, and Google Cloud BOQs under the same validation and reporting model.
 
 ## Copilot usage
 
