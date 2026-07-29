@@ -1,0 +1,49 @@
+workloads:
+  - name: ecommerce-api
+    type: web-api
+    criticality: high
+  - name: analytics-batch
+    type: batch
+    criticality: medium
+sla_targets:
+  uptime: "99.95%"
+  p95_latency_ms: 200
+compute:
+  - workload: ecommerce-api
+    vcpu: 32
+    memory_gb: 128
+  - workload: analytics-batch
+    vcpu: 16
+    memory_gb: 64
+storage:
+  - type: block
+    class: premium
+    size_gb: 4096
+    iops: 12000
+  - type: object
+    class: hot-cool
+    size_gb: 51200
+network:
+  egress_gb_per_month: 15000
+  private_connectivity: true
+databases:
+  - engine: postgres
+    size_gb: 1024
+    ha: true
+    backups_days: 14
+environments:
+  - prod
+  - dev
+  - test
+  - dr
+regions:
+  primary: eastus
+  dr: westus2
+availability:
+  rto_minutes: 30
+  rpo_minutes: 5
+growth:
+  annual_percent: 25
+owned_licenses:
+  - Windows Server Datacenter
+  - SQL Server Enterprise

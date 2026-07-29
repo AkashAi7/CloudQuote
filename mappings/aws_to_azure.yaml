@@ -1,0 +1,45 @@
+mappings:
+  EC2:
+    azure_service: Azure Virtual Machines
+    default_families:
+      - Dv5
+      - Ev5
+      - Fsv2
+    notes: "Right-size to vCPU/RAM and workload profile; do not blind-copy quantity."
+  EBS:
+    azure_service: Azure Managed Disks
+    tiers:
+      gp3: Premium SSD v2
+      io1: Ultra Disk
+      st1: Standard SSD
+      sc1: Standard HDD
+  S3:
+    azure_service: Azure Blob Storage
+    tiers:
+      standard: Hot
+      infrequent_access: Cool
+      glacier: Archive
+  RDS:
+    azure_service: "Azure SQL Database or Azure Database for PostgreSQL Flexible Server"
+    notes: "Choose engine-equivalent managed PaaS with HA and backup parity."
+  DynamoDB:
+    azure_service: Azure Cosmos DB for NoSQL
+  Lambda:
+    azure_service: Azure Functions
+  EKS:
+    azure_service: Azure Kubernetes Service
+  ELB:
+    azure_service: Azure Load Balancer
+  ALB:
+    azure_service: Azure Application Gateway
+  Redshift:
+    azure_service: Azure Synapse Analytics
+  CloudFront:
+    azure_service: Azure Front Door
+  VPC:
+    azure_service: Azure Virtual Network
+
+non_one_to_one:
+  - service: AWS Savings Plans
+    best_fit: "Compare against Azure Reservations; Savings Plan-like flexibility may require manual validation."
+    note: "Mark [VALIDATE] when strict equivalent price source is unavailable in Retail Prices API."

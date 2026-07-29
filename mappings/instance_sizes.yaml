@@ -1,0 +1,43 @@
+instances:
+  m5.large:
+    vcpu: 2
+    memory_gb: 8
+    azure_candidates:
+      - Standard_D2s_v5
+      - Standard_E2s_v5
+  m5.xlarge:
+    vcpu: 4
+    memory_gb: 16
+    azure_candidates:
+      - Standard_D4s_v5
+      - Standard_E4s_v5
+  m5.2xlarge:
+    vcpu: 8
+    memory_gb: 32
+    azure_candidates:
+      - Standard_D8s_v5
+      - Standard_E8s_v5
+  m5.4xlarge:
+    vcpu: 16
+    memory_gb: 64
+    azure_candidates:
+      - Standard_D16s_v5
+      - Standard_E16s_v5
+  c5.2xlarge:
+    vcpu: 8
+    memory_gb: 16
+    azure_candidates:
+      - Standard_F8s_v2
+      - Standard_D8s_v5
+  r5.2xlarge:
+    vcpu: 8
+    memory_gb: 64
+    azure_candidates:
+      - Standard_E8s_v5
+      - Standard_E8as_v5
+  t3.large:
+    vcpu: 2
+    memory_gb: 8
+    azure_candidates:
+      - Standard_B2ms
+      - Standard_D2s_v5

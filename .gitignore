@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# Customer inputs and generated pricing artifacts
+*.xlsx
+*.xlsx~
+*.docx
+engagements/
+pricing_cache.json
+normalized.json
+summary.json
+executive_summary.md
+
+# Local agent tooling
+.agents/
+scripts/_diag_*.py

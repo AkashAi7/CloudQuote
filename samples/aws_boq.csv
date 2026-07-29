@@ -1,0 +1,14 @@
+Service,Instance/SKU,Quantity,Region,Term,Unit Price,Monthly,Annual,Environment,Capacity,Azure Service,Azure SKU
+EC2,m5.2xlarge,4,us-east-1,On-Demand,0.384,1120,13440,prod,8 vCPU / 32 GB,Azure Virtual Machines,Standard_D8s_v5
+EC2,m5.xlarge,6,us-east-1,On-Demand,0.192,840,10080,dev,4 vCPU / 16 GB,Azure Virtual Machines,Standard_D4s_v5
+EC2,c5.2xlarge,3,us-east-1,On-Demand,0.34,745,8940,test,8 vCPU / 16 GB,Azure Virtual Machines,Standard_F8s_v2
+RDS,db.r6g.2xlarge,2,us-east-1,On-Demand,1.05,1533,18396,prod,8 vCPU / 64 GB,Azure Database for PostgreSQL Flexible Server,General Purpose_D8s_v5
+EBS,gp3,20,us-east-1,On-Demand,0.08,650,7800,prod,4 TB total,Azure Managed Disks,Premium SSD v2
+S3,Standard,1,us-east-1,On-Demand,0.023,1177,14124,prod,50 TB,Azure Blob Storage,Hot LRS
+ELB,Application Load Balancer,2,us-east-1,On-Demand,0.0225,325,3900,prod,2 ALB units,Azure Application Gateway,Standard_v2
+CloudFront,Data Transfer,1,global,On-Demand,0.085,980,11760,prod,15 TB egress,Azure Front Door,Standard
+Lambda,128MB,12000000,us-east-1,On-Demand,0.0000002,240,2880,prod,12M requests,Azure Functions,Consumption
+DynamoDB,On-Demand R/W,1,us-east-1,On-Demand,0.0,540,6480,prod,400M R/W units,Azure Cosmos DB for NoSQL,Autoscale
+EKS,Managed Cluster,2,us-east-1,On-Demand,0.1,146,1752,prod,2 clusters,Azure Kubernetes Service,Standard
+Redshift,ra3.4xlarge,1,us-east-1,On-Demand,3.26,2379,28548,prod,1 DW cluster,Azure Synapse Analytics,Dedicated SQL Pool
+VPC,NAT + Data Processing,1,us-east-1,On-Demand,0.0,420,5040,prod,1 VPC baseline,Azure Virtual Network,Standard
