@@ -45,6 +45,36 @@ class QuotePlanTests(unittest.TestCase):
     with self.assertRaises(QuotePlanError):
       apply_quote_plan(self.normalized, plan)
 
+  def test_reviewed_pricing_evidence_reaches_normalized_input(self) -> None:
+    plan = build_quote_plan(self.normalized)
+    evidence = {
+      "source": "mcp-web",
+      "status": "approved",
+      "provider": "azure",
+      "service": "Virtual Machines",
+      "sku": "Standard_D4s_v5",
+      "region": "eastus",
+      "currency": "USD",
+      "priceType": "Consumption",
+      "meterName": "D4s v5",
+      "unitOfMeasure": "1 Hour",
+      "unitPrice": 0.192,
+      "retrievedAt": "2026-07-30T12:00:00+00:00",
+      "evidenceUrl": "https://azure.microsoft.com/pricing/details/virtual-machines/",
+    }
+    plan["lines"][0]["pricingEvidence"] = [evidence]
+
+    result = apply_quote_plan(self.normalized, plan)
+
+    self.assertEqual([evidence], result["aws_boq"][0]["Pricing Evidence"])
+
+  def test_incomplete_pricing_evidence_is_rejected(self) -> None:
+    plan = build_quote_plan(self.normalized)
+    plan["lines"][0]["pricingEvidence"] = [{"source": "mcp-web", "status": "approved"}]
+
+    with self.assertRaisesRegex(QuotePlanError, "pricing evidence"):
+      apply_quote_plan(self.normalized, plan)
+
 
 if __name__ == "__main__":
   unittest.main()

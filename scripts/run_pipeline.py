@@ -173,7 +173,7 @@ def main() -> None:
   parser.add_argument("--plan", help="Validated CloudQuote quote-plan.json supplied by the agent workflow")
   parser.add_argument("--normalized-input", help="Previously normalized input to avoid duplicate parsing")
   parser.add_argument("--max-price-age-hours", type=float, default=24.0)
-  parser.add_argument("--enable-web-search", action="store_true", help="Allow slower unstructured web estimates after official sources fail")
+  parser.add_argument("--enable-web-search", action="store_true", help="Require reviewed MCP/search-API evidence after official sources fail (legacy option name)")
   parser.add_argument("--price-cache", help="Optional isolated pricing-cache path")
   args = parser.parse_args()
 
@@ -236,7 +236,9 @@ def main() -> None:
       quote_plan = load_quote_plan(supplied_plan_path)
     else:
       quote_plan = build_quote_plan(normalized)
-    require_target_provider(str(quote_plan["targetProvider"])).validate_plan(quote_plan)
+    target_adapter = require_target_provider(str(quote_plan["targetProvider"]))
+    target_adapter.validate_plan(quote_plan)
+    target_adapter.require_capability("compile")
     save_quote_plan(quote_plan, quote_plan_path)
     normalized = apply_quote_plan(normalized, quote_plan)
     _write_json_atomic(normalized_path, normalized)
@@ -257,6 +259,13 @@ def main() -> None:
     manifest = {
       "fingerprint": fingerprint,
       "completedAt": datetime.now(timezone.utc).isoformat(),
+      "pricingPolicy": {
+        "officialSourcesFirst": True,
+        "compilerHtmlScrapingEnabled": False,
+        "reviewedEvidenceFallbackEnabled": args.enable_web_search,
+        "reviewedEvidenceRequired": True,
+      },
+      "pricingMetrics": summary.get("pricingMetrics", {}),
       "artifactHashes": {name: _file_sha256(Path(path)) for name, path in artifacts.items()},
     }
     _write_json_atomic(manifest_path, manifest)

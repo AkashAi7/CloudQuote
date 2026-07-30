@@ -144,6 +144,10 @@ def _normalize_aws_rows(rows: List[Dict[str, Any]], azure_ref: Dict[str, Dict[st
     environment = str(_first_non_empty(row, ["Environment", "environment"], "prod")).strip() or "prod"
     azure_service = str(_first_non_empty(row, ["Azure Service", "azure_service"], "")).strip()
     azure_sku = str(_first_non_empty(row, ["Azure SKU", "azure_sku"], "")).strip()
+    meter_contains = str(_first_non_empty(row, ["Meter Contains", "meter_contains"], "")).strip()
+    product_contains = str(_first_non_empty(row, ["Product Contains", "product_contains"], "")).strip()
+    force_validate = str(_first_non_empty(row, ["Force Validate", "force_validate"], "")).strip()
+    price_region = str(_first_non_empty(row, ["Price Region", "price_region"], "")).strip()
 
     capacity_value = description
     if quantity_raw and quantity_raw.strip() and quantity_raw.strip() not in {"1", "1.0"}:
@@ -162,6 +166,10 @@ def _normalize_aws_rows(rows: List[Dict[str, Any]], azure_ref: Dict[str, Dict[st
         "Capacity": capacity_value,
         "Azure Service": azure_service,
         "Azure SKU": azure_sku,
+        "Meter Contains": meter_contains,
+        "Product Contains": product_contains,
+        "Force Validate": force_validate,
+        "Price Region": price_region,
         "Source Description": description,
         "Source Unit": source_unit,
         "Local Azure Unit Price": azure_local.get("unit_price", ""),

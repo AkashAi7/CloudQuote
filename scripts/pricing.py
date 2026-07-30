@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import re
@@ -11,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import quote
 
 if TYPE_CHECKING:
   import requests
@@ -19,9 +18,6 @@ if TYPE_CHECKING:
 API_BASE = "https://prices.azure.com/api/retail/prices"
 DEFAULT_CACHE_PATH = Path(__file__).resolve().parent.parent / "pricing_cache.json"
 CACHE_PATH = Path(os.getenv("CLOUDQUOTE_PRICE_CACHE_PATH", str(DEFAULT_CACHE_PATH)))
-WEB_SEARCH_ENDPOINT = "https://www.bing.com/search"
-DDG_SEARCH_ENDPOINT = "https://duckduckgo.com/html/"
-
 _CACHE_DATA: Dict[str, Any] | None = None
 _CACHE_MUTEX = threading.Lock()
 _PENDING_CACHE: Dict[str, Any] = {}
@@ -237,6 +233,8 @@ def _resolved_cache_key(
   meter_contains: str | None,
   product_contains: str | None,
   select_service_name: str | None,
+  strict_contains: bool = False,
+  reviewed_evidence: List[Dict[str, Any]] | None = None,
 ) -> str:
   payload = {
     "region": region,
@@ -250,219 +248,14 @@ def _resolved_cache_key(
     "meterContains": meter_contains,
     "productContains": product_contains,
     "selectServiceName": select_service_name,
+    "strictContains": strict_contains,
+    "reviewedEvidence": reviewed_evidence or [],
   }
   return "resolved::" + json.dumps(payload, sort_keys=True)
 
 
 def _save_resolved_cache(key: str, value: Dict[str, Any], cache_path: Path = CACHE_PATH) -> None:
   _update_cache_entry(key, _with_cache_timestamp(value), cache_path)
-
-
-def _extract_web_price(text: str) -> float | None:
-  # Price parsing from snippets and pages; prefers currency-tagged values, then per-hour style decimals.
-  for match in re.finditer(r"(?:\$|USD\s*)(\d+(?:,\d{3})*(?:\.\d+)?)", text, flags=re.IGNORECASE):
-    raw = match.group(1).replace(",", "")
-    try:
-      value = float(raw)
-    except ValueError:
-      continue
-    if 0 < value < 100000:
-      return value
-
-  for match in re.finditer(r"\b(\d+(?:\.\d+)?)\s*(?:/\s*hour|per\s*hour|hourly)\b", text, flags=re.IGNORECASE):
-    try:
-      value = float(match.group(1))
-    except ValueError:
-      continue
-    if 0 < value < 100000:
-      return value
-
-  for match in re.finditer(r"\b(\d+\.\d{2,4})\b", text):
-    try:
-      value = float(match.group(1))
-    except ValueError:
-      continue
-    if 0 < value < 100000:
-      return value
-  return None
-
-
-def _decode_bing_link(link: str) -> str:
-  try:
-    parsed = urlparse(link)
-    if "bing.com" not in parsed.netloc:
-      return link
-    qs = parse_qs(parsed.query)
-    encoded = qs.get("u", [""])[0]
-    if not encoded:
-      return link
-    encoded = unquote(encoded)
-    if encoded.startswith("a1"):
-      encoded = encoded[2:]
-    padding = "=" * ((4 - len(encoded) % 4) % 4)
-    decoded = base64.urlsafe_b64decode((encoded + padding).encode("utf-8")).decode("utf-8", errors="ignore")
-    return decoded if decoded.startswith("http") else link
-  except Exception:
-    return link
-
-
-def _extract_links_from_html(html: str) -> List[str]:
-  links: List[str] = []
-
-  # Primary: standard anchor extraction.
-  for pattern in [r'href="([^"]+)"', r"href='([^']+)'"]:
-    for raw in re.findall(pattern, html, flags=re.IGNORECASE):
-      decoded = _decode_bing_link(raw)
-      if decoded.startswith("http") and decoded not in links:
-        links.append(decoded)
-
-  # Fallback: plain URL extraction from script blobs or serialized payloads.
-  for raw in re.findall(r"https?://[^\s\"'<>]+", html, flags=re.IGNORECASE):
-    cleaned = raw.strip().rstrip(",.;)")
-    if cleaned.startswith("http") and cleaned not in links:
-      links.append(cleaned)
-
-  return links
-
-
-def _search_ddg_links(query: str, session: requests.Session) -> List[str]:
-  try:
-    response = session.get(
-      DDG_SEARCH_ENDPOINT,
-      params={"q": query},
-      timeout=20,
-      headers={"User-Agent": "Mozilla/5.0"},
-    )
-    response.raise_for_status()
-    html = response.text
-  except Exception:
-    return []
-
-  links: List[str] = []
-  for raw in re.findall(r'href="([^"]+)"', html, flags=re.IGNORECASE):
-    decoded = unquote(raw)
-    match = re.search(r"uddg=([^&]+)", decoded)
-    if match:
-      decoded = unquote(match.group(1))
-    if decoded.startswith("http") and decoded not in links:
-      links.append(decoded)
-  return links
-
-
-def _search_web_price(
-  region: str,
-  currency_code: str,
-  service_name: str | None,
-  sku_name: str | None,
-  meter_name: str | None,
-  price_type: str,
-  reservation_term: str | None,
-  search_hint: str | None = None,
-  session: requests.Session | None = None,
-) -> Dict[str, Any]:
-  session = session or _new_session()
-  service_token = service_name or "Azure service"
-  sku_token = sku_name or meter_name or "SKU"
-  term_token = reservation_term or price_type
-  hint = f" {search_hint}" if search_hint else ""
-  query = f"site:azure.microsoft.com/pricing/details Azure {service_token} {sku_token}{hint} {region} {currency_code} price {term_token}"
-  search_url = f"{WEB_SEARCH_ENDPOINT}?q={quote(query)}"
-  try:
-    response = session.get(
-      WEB_SEARCH_ENDPOINT,
-      params={"q": query},
-      timeout=20,
-      headers={"User-Agent": "Mozilla/5.0"},
-    )
-    response.raise_for_status()
-    html = response.text
-  except Exception:
-    return {
-      "best": None,
-      "links": [search_url],
-      "query": query,
-    }
-
-  links = _extract_links_from_html(html)
-
-  # If Bing returned challenge/minimal markup, try DDG as backup index.
-  looks_challenged = any(tok in html.lower() for tok in ["captcha", "challenge", "automated", "verify you are"])
-  if looks_challenged or not links:
-    for link in _search_ddg_links(query, session):
-      if link not in links:
-        links.append(link)
-
-  snippets = re.findall(r'<div class="b_caption"[^>]*>.*?<p>(.*?)</p>', html, flags=re.DOTALL)
-
-  cleaned_snippets = [re.sub(r"<[^>]+>", " ", s) for s in snippets]
-  combined_text = "\n".join(cleaned_snippets)
-  price = _extract_web_price(combined_text)
-
-  if price is None and links:
-    candidate_links = [l for l in links if "azure.microsoft.com/pricing" in l.lower()]
-    if not candidate_links:
-      candidate_links = links
-    for link in candidate_links[:5]:
-      try:
-        page = session.get(link, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if page.status_code >= 400:
-          continue
-        text = re.sub(r"<[^>]+>", " ", page.text)
-        price = _extract_web_price(text)
-        if price is not None:
-          break
-      except Exception:
-        continue
-
-  evidence_links: List[str] = [search_url]
-  for link in links[:5]:
-    if link not in evidence_links:
-      evidence_links.append(link)
-
-  if price is None:
-    return {
-      "best": None,
-      "links": evidence_links,
-      "query": query,
-    }
-
-  return {
-    "best": {
-      "retailPrice": price,
-      "unitOfMeasure": "Web Estimated Unit",
-      "effectiveStartDate": datetime.now(timezone.utc).date().isoformat(),
-      "serviceName": service_name or "",
-      "skuName": sku_name or "",
-      "meterName": meter_name or "",
-      "productName": "Web search estimate",
-      "sourceLinks": evidence_links,
-    },
-    "links": evidence_links,
-    "query": query,
-  }
-
-
-def _search_web_price_relaxed(
-  region: str,
-  currency_code: str,
-  service_name: str | None,
-  search_hint: str | None = None,
-  session: requests.Session | None = None,
-) -> Dict[str, Any]:
-  # Relaxed pass used when strict API/SKU/product mapping misses.
-  normalized_hint = re.sub(r"\b\d+\b", " ", search_hint or "")
-  normalized_hint = re.sub(r"\s+", " ", normalized_hint).strip()
-  return _search_web_price(
-    region=region,
-    currency_code=currency_code,
-    service_name=service_name,
-    sku_name=None,
-    meter_name=None,
-    price_type="Consumption",
-    reservation_term=None,
-    search_hint=normalized_hint or None,
-    session=session,
-  )
 
 
 def resolve_best_price(
@@ -479,6 +272,8 @@ def resolve_best_price(
   select_service_name: str | None = None,
   search_hint: str | None = None,
   enable_web_search: bool | None = None,
+  strict_contains: bool = False,
+  reviewed_evidence: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
   resolved_key = _resolved_cache_key(
     region,
@@ -492,19 +287,25 @@ def resolve_best_price(
     meter_contains,
     product_contains,
     select_service_name,
+    strict_contains,
+    reviewed_evidence,
   )
+  if enable_web_search is None:
+    enable_web_search = os.getenv("CLOUDQUOTE_ENABLE_WEB_SEARCH", "false").lower() in {"1", "true", "yes"}
   cache = load_cache()
 
   cached = cache.get(resolved_key)
   if _cache_entry_is_fresh(cached):
     cached_best = cached.get("best")
     cached_note = str(cached.get("note", ""))
-    return {
-      "source": "CACHE" if cached_best else "NONE",
-      "best": cached_best,
-      "links": cached.get("links", []),
-      "note": "[CACHE_HIT] Using previously resolved price" if cached_best else (cached_note or "[CACHE_HIT] Reusing previous unresolved lookup"),
-    }
+    if cached_best or not enable_web_search:
+      return {
+        "source": "CACHE" if cached_best else "NONE",
+        "originSource": cached.get("originSource") or cached.get("source"),
+        "best": cached_best,
+        "links": cached.get("links", []),
+        "note": "[CACHE_HIT] Using previously resolved price" if cached_best else (cached_note or "[CACHE_HIT] Reusing previous unresolved lookup"),
+      }
 
   # 1) API
   try:
@@ -527,6 +328,7 @@ def resolve_best_price(
     meter_contains=meter_contains,
     product_contains=product_contains,
     service_name=select_service_name,
+    strict_contains=strict_contains,
   )
   if api_best:
     resolved = {
@@ -538,79 +340,53 @@ def resolve_best_price(
     _save_resolved_cache(resolved_key, resolved)
     return resolved
 
-  if enable_web_search is None:
-    enable_web_search = os.getenv("CLOUDQUOTE_ENABLE_WEB_SEARCH", "false").lower() in {"1", "true", "yes"}
+  fallback_attempted = bool(reviewed_evidence and service_name and (sku_name or target_sku))
+  fallback_started = time.perf_counter()
+  if fallback_attempted:
+    from providers.evidence import resolve_reviewed_evidence
+
+    evidence_result = resolve_reviewed_evidence(
+      reviewed_evidence,
+      provider="azure",
+      region=region,
+      currency=currency_code,
+      service=service_name,
+      sku=sku_name or target_sku or "",
+      price_type=price_type,
+      reservation_term=reservation_term,
+      max_age_hours=float(os.getenv("CLOUDQUOTE_EVIDENCE_MAX_AGE_HOURS", "168")),
+    )
+    if evidence_result:
+      evidence_result = {
+        **evidence_result,
+        "fallbackAttempted": True,
+        "fallbackSucceeded": True,
+        "fallbackLatencyMs": round((time.perf_counter() - fallback_started) * 1000.0, 3),
+      }
+      _save_resolved_cache(resolved_key, evidence_result)
+      return evidence_result
+
+  fallback_latency_ms = round((time.perf_counter() - fallback_started) * 1000.0, 3) if fallback_attempted else 0.0
+
   if not enable_web_search:
     return {
       "source": "NONE",
       "best": None,
       "links": [],
-      "note": "[VALIDATE] Azure Retail Prices API did not resolve this meter; generic web estimates are disabled",
+      "note": "[VALIDATE] Azure Retail Prices API did not resolve this meter and no approved pricing evidence was supplied",
+      "fallbackAttempted": fallback_attempted,
+      "fallbackSucceeded": False,
+      "fallbackLatencyMs": fallback_latency_ms,
     }
-
-  web_attempt_links: List[str] = []
-
-  # 2) Web search (strict)
-  web_attempt = _search_web_price(
-    region=region,
-    currency_code=currency_code,
-    service_name=service_name,
-    sku_name=sku_name,
-    meter_name=meter_name,
-    price_type=price_type,
-    reservation_term=reservation_term,
-    search_hint=search_hint,
-  )
-  for link in web_attempt.get("links", []):
-    if link not in web_attempt_links:
-      web_attempt_links.append(link)
-  web_best = web_attempt.get("best")
-  if web_best:
-    resolved = {
-      "source": "WEB",
-      "best": web_best,
-      "links": web_attempt.get("links", web_best.get("sourceLinks", [])),
-      "note": "[WEB_ESTIMATE] Verify before final quote",
-    }
-    _save_resolved_cache(resolved_key, resolved)
-    return resolved
-
-  # 2b) Web search (relaxed): trigger when SKU/product mapping appears incomplete.
-  if any([sku_name, target_sku, meter_contains, product_contains]):
-    relaxed_hint = " ".join(
-      [
-        search_hint or "",
-        sku_name or "",
-        target_sku or "",
-        meter_contains or "",
-        product_contains or "",
-      ]
-    ).strip()
-    web_relaxed_attempt = _search_web_price_relaxed(
-      region=region,
-      currency_code=currency_code,
-      service_name=service_name,
-      search_hint=relaxed_hint or None,
-    )
-    for link in web_relaxed_attempt.get("links", []):
-      if link not in web_attempt_links:
-        web_attempt_links.append(link)
-    web_relaxed = web_relaxed_attempt.get("best")
-    if web_relaxed:
-      resolved = {
-        "source": "WEB",
-        "best": web_relaxed,
-        "links": web_relaxed_attempt.get("links", web_relaxed.get("sourceLinks", [])),
-        "note": "[WEB_ESTIMATE_RELAXED] API filters missed; verify before final quote",
-      }
-      _save_resolved_cache(resolved_key, resolved)
-      return resolved
 
   resolved = {
     "source": "NONE",
     "best": None,
-    "links": web_attempt_links,
-    "note": "[VALIDATE] Price not resolved via API, web (strict/relaxed), or cache; [WEB_ATTEMPTED]",
+    "links": [],
+    "note": "[VALIDATE] API price unresolved; approved MCP or search-API pricing evidence is required. Compiler HTML scraping is disabled",
+    "fallbackAttempted": fallback_attempted,
+    "fallbackSucceeded": False,
+    "fallbackLatencyMs": fallback_latency_ms,
   }
   _save_resolved_cache(resolved_key, resolved)
   return resolved
@@ -627,6 +403,7 @@ def select_best_price(
   product_contains: str | None = None,
   service_name: str | None = None,
   allow_zero_price: bool = False,
+  strict_contains: bool = False,
 ) -> Dict[str, Any] | None:
   if not items:
     return None
@@ -646,11 +423,17 @@ def select_best_price(
     matches = [i for i in candidates if _contains(str(i.get("productName", "")), product_contains)]
     if matches:
       candidates = matches
+    elif strict_contains:
+      # The caller pinned this product deliberately. Falling through to an unrelated meter would
+      # silently produce a wrong number, so report no match and let the caller flag the line.
+      return None
 
   if meter_contains:
     matches = [i for i in candidates if _contains(str(i.get("meterName", "")), meter_contains)]
     if matches:
       candidates = matches
+    elif strict_contains:
+      return None
 
   positive = [i for i in candidates if float(i.get("retailPrice", 0.0) or 0.0) > 0.0]
   if positive and not allow_zero_price:

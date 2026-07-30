@@ -42,6 +42,23 @@ AWS_SERVICE_ALIASES = {
   "github.com": "GitHub",
 }
 
+# Target services that publish reserved-capacity meters in the Azure Retail Prices API.
+# Lines mapped to these services attempt Reservation pricing for 1-year/3-year scenarios and
+# fall back to Consumption with an explicit [RESERVATION_FALLBACK] note when no term price exists.
+RESERVATION_CAPABLE_TARGET_SERVICES = {
+  "virtual machines",
+  "azure database for mysql",
+  "azure database for postgresql",
+  "azure database for mariadb",
+  "sql database",
+  "azure cosmos db",
+  "redis cache",
+  "azure cache for redis",
+  "azure synapse analytics",
+  "sql data warehouse",
+  "azure data explorer",
+}
+
 
 def _num(v: Any) -> float:
   if isinstance(v, (int, float)):
@@ -75,17 +92,40 @@ def _reservation_months(reservation_term: str | None) -> int:
   return 1
 
 
+def _uom_multiplier(unit_of_measure: str) -> float:
+  """Return the pack size encoded in a retail unitOfMeasure such as '100 Hours' or '1M Operations'."""
+  match = re.match(r"\s*(\d+(?:\.\d+)?)\s*([km])?\b", (unit_of_measure or "").lower())
+  if not match:
+    return 1.0
+  value = float(match.group(1))
+  suffix = match.group(2)
+  if suffix == "k":
+    value *= 1_000.0
+  elif suffix == "m":
+    value *= 1_000_000.0
+  return value if value > 0 else 1.0
+
+
 def _monthly_from_unit(unit_price: float, unit_of_measure: str, qty: float) -> tuple[float | None, str]:
   uom = (unit_of_measure or "").lower()
-  if "hour" in uom:
-    return unit_price * qty * 730.0, "hourly_to_monthly_730h"
-  if "month" in uom:
-    return unit_price * qty, "monthly"
-  if "gib/hour" in uom or "gb/hour" in uom:
-    return unit_price * qty * 730.0, "capacity_hourly_to_monthly_730h"
   if uom == "10":
     return unit_price * qty, "per_10_units"
-  return None, "[VALIDATE] unitOfMeasure conversion required"
+  pack = _uom_multiplier(uom)
+  pack_note = "" if pack == 1.0 else f"_per_{int(pack) if pack.is_integer() else pack}_units"
+  if "gib/hour" in uom or "gb/hour" in uom:
+    return unit_price * qty * 730.0 / pack, f"capacity_hourly_to_monthly_730h{pack_note}"
+  if "hour" in uom:
+    return unit_price * qty * 730.0 / pack, f"hourly_to_monthly_730h{pack_note}"
+  if "day" in uom:
+    return unit_price * qty * 30.4167 / pack, f"daily_to_monthly_30_4167d{pack_note}"
+  if "month" in uom:
+    return unit_price * qty / pack, f"monthly{pack_note}"
+  if pack != 1.0:
+    return unit_price * qty / pack, f"per_unit{pack_note}"
+  # A bare consumption unit such as '1 GB', '1' or '1 Rotation' carries no time dimension, so the
+  # meter is charged per unit consumed. The BOQ contract states quantities are monthly volumes,
+  # which makes the direct product the monthly cost. The note keeps that assumption reviewable.
+  return unit_price * qty, "per_unit_monthly_quantity_assumed"
 
 
 def _extract_capacity_number(text: str, unit: str) -> float | None:
@@ -206,6 +246,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "meter_contains": None,
       "product_contains": None,
       "reservation_supported": True,
+      "strict_sku": True,
       "capacity_note": "",
     }
   if service == "EBS":
@@ -349,7 +390,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
     "sku_candidates": [azure_sku] if azure_sku else [],
     "meter_contains": None,
     "product_contains": None,
-    "reservation_supported": False,
+    "reservation_supported": azure_service.strip().lower() in RESERVATION_CAPABLE_TARGET_SERVICES,
     "capacity_note": "",
     "force_validate": False,
   }
@@ -382,6 +423,9 @@ def _lookup_live_price(
       "note": "[VALIDATE] Componentized pricing required",
       "validate": True,
     }
+  # Zone-priced global services (CDN, DNS, Front Door) publish no meters under a physical region,
+  # so a line may name the pricing region its meter actually lives in.
+  region = str(profile.get("price_region") or region)
   conversion_validation = str(profile.get("conversion_validation", "")).strip()
   if conversion_validation:
     intended_meter = profile.get("meter_contains") or profile.get("product_contains") or "unspecified"
@@ -420,12 +464,14 @@ def _lookup_live_price(
       product_contains=profile["product_contains"],
       select_service_name=profile["service_name"],
       search_hint=f"{source_sku} {capacity}".strip(),
+      strict_contains=bool(profile.get("strict_contains")),
+      reviewed_evidence=profile.get("pricing_evidence", []),
     )
     if resolved and resolved.get("best"):
       chosen_sku = candidate
       break
 
-  if (not resolved or not resolved.get("best")) and not profile["reservation_supported"] and profile["service_name"]:
+  if (not resolved or not resolved.get("best")) and not profile.get("strict_sku") and profile["service_name"]:
     resolved = resolve_best_price(
       region=region,
       currency_code=currency,
@@ -439,11 +485,15 @@ def _lookup_live_price(
       product_contains=profile["product_contains"],
       select_service_name=profile["service_name"],
       search_hint=f"{source_sku} {capacity}".strip(),
+      strict_contains=bool(profile.get("strict_contains")),
+      reviewed_evidence=profile.get("pricing_evidence", []),
     )
 
   best = resolved.get("best") if resolved else None
   reservation_fallback_note = ""
+  reservation_fallback_attempted = False
   if not best and str(query["price_type"]) == "Reservation":
+    reservation_fallback_attempted = True
     # If reservation term is missing from sources, fallback to consumption so scenario still resolves with explicit note.
     resolved = resolve_best_price(
       region=region,
@@ -458,6 +508,8 @@ def _lookup_live_price(
       product_contains=profile["product_contains"],
       select_service_name=profile["service_name"],
       search_hint=f"{source_sku} {capacity}".strip(),
+      strict_contains=bool(profile.get("strict_contains")),
+      reviewed_evidence=profile.get("pricing_evidence", []),
     )
     best = resolved.get("best") if resolved else None
     if best:
@@ -477,10 +529,36 @@ def _lookup_live_price(
       "source": "NONE",
       "source_links": resolved_links,
       "source_note": resolved_note,
+      "fallback_attempted": bool(resolved and resolved.get("fallbackAttempted")) or reservation_fallback_attempted,
+      "fallback_succeeded": False,
+      "fallback_latency_ms": float(resolved.get("fallbackLatencyMs", 0.0)) if resolved else 0.0,
     }
 
   retail_price = float(best.get("retailPrice", 0.0))
   unit_of_measure = str(best.get("unitOfMeasure", ""))
+  is_web_evidence = bool(
+    resolved
+    and (
+      resolved.get("source") == "WEB"
+      or resolved.get("originSource") == "WEB"
+      or best.get("productName") == "Web search estimate"
+      or unit_of_measure == "Web Estimated Unit"
+    )
+  )
+  if is_web_evidence:
+    return {
+      "unit_price": retail_price,
+      "monthly": 0.0,
+      "annual": 0.0,
+      "uom": unit_of_measure,
+      "price_date": str(best.get("effectiveStartDate", "")),
+      "note": "[VALIDATE] Web estimate has no verified Azure meter dimension",
+      "validate": True,
+      "resolved_sku": chosen_sku or str(best.get("skuName", "")),
+      "source": str(resolved.get("source", "WEB")),
+      "source_links": list(resolved.get("links", [])),
+      "source_note": str(resolved.get("note", "")),
+    }
   if str(query["price_type"]) == "Reservation":
     months = _reservation_months(query["reservation_term"])
     monthly = (retail_price / months) * billable_qty
@@ -519,6 +597,9 @@ def _lookup_live_price(
     "source": str(resolved.get("source", "API")) if resolved else "API",
     "source_links": list(resolved.get("links", [])) if resolved else [],
     "source_note": str(resolved.get("note", "")) if resolved else "",
+    "fallback_attempted": bool(resolved and resolved.get("fallbackAttempted")) or reservation_fallback_attempted,
+    "fallback_succeeded": bool(resolved and resolved.get("fallbackSucceeded")) or bool(reservation_fallback_note),
+    "fallback_latency_ms": float(resolved.get("fallbackLatencyMs", 0.0)) if resolved else 0.0,
   }
 
 
@@ -542,15 +623,74 @@ def _price_cache_key(
       "sku_candidates": profile.get("sku_candidates", []),
       "meter_contains": profile.get("meter_contains", ""),
       "product_contains": profile.get("product_contains", ""),
+      "price_region": profile.get("price_region", ""),
+      "strict_contains": bool(profile.get("strict_contains", False)),
       "reservation_supported": bool(profile.get("reservation_supported", False)),
       "force_validate": bool(profile.get("force_validate", False)),
       "conversion_validation": profile.get("conversion_validation", ""),
       "pricing_provider": profile.get("pricing_provider", ""),
       "catalog_name": profile.get("catalog_name", ""),
       "catalog_sku": profile.get("catalog_sku", ""),
+      "pricing_evidence": profile.get("pricing_evidence", []),
     },
     sort_keys=True,
   )
+
+
+_TRUTHY = {"1", "true", "yes", "y"}
+
+
+def _apply_plan_overrides(profile: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
+  """Let a reviewed quote plan or a derived BOQ pin the meter a line must resolve against.
+
+  Two override channels are supported:
+
+  * Documented assumptions on a line mean the analyst has supplied the dimensions the built-in
+    guardrail was waiting for, so the blocker is replaced by whatever residual validations the
+    plan still declares. Lines without assumptions or validations keep the built-in guardrail.
+  * Optional ``Meter Contains`` / ``Product Contains`` / ``Force Validate`` columns on the source
+    BOQ pin the retail meter directly. This is required for RFP-derived inputs, where one target
+    service publishes many meters (deployment vs capacity unit vs data processed) and only the
+    tender author knows which one the line is asking for.
+  """
+  overridden = dict(profile)
+  changed = False
+
+  plan_assumptions = [str(item) for item in row.get("Mapping Assumptions", []) if str(item).strip()]
+  plan_validations = [str(item) for item in row.get("Plan Validations", []) if str(item).strip()]
+  if plan_assumptions or plan_validations:
+    overridden["conversion_validation"] = "; ".join(plan_validations)
+    changed = True
+
+  meter_contains = str(row.get("Meter Contains", "")).strip()
+  product_contains = str(row.get("Product Contains", "")).strip()
+  if meter_contains:
+    overridden["meter_contains"] = meter_contains
+    changed = True
+  if product_contains:
+    overridden["product_contains"] = product_contains
+    changed = True
+  if meter_contains or product_contains:
+    # Pinning a meter is the analyst answering the question the built-in guardrail was asking,
+    # so the blocker it raised no longer applies to this line. The pin is also authoritative:
+    # if it matches nothing the line must fail loudly rather than resolve to a different meter.
+    overridden["conversion_validation"] = ""
+    overridden["force_validate"] = False
+    overridden["strict_contains"] = True
+    changed = True
+  price_region = str(row.get("Price Region", "")).strip()
+  if price_region:
+    overridden["price_region"] = price_region
+    changed = True
+  if str(row.get("Force Validate", "")).strip().lower() in _TRUTHY:
+    overridden["force_validate"] = True
+    changed = True
+  pricing_evidence = row.get("Pricing Evidence", [])
+  if isinstance(pricing_evidence, list) and pricing_evidence:
+    overridden["pricing_evidence"] = pricing_evidence
+    changed = True
+
+  return overridden if changed else profile
 
 
 def _prefetch_prices(
@@ -570,10 +710,7 @@ def _prefetch_prices(
     azure_sku = str(row.get("Azure SKU", sku or "[VALIDATE]"))
     billable_qty = _billable_quantity(service, qty, capacity)
     profile = _price_profile(service, azure_service, azure_sku, capacity, sku)
-    plan_validations = [str(item) for item in row.get("Plan Validations", []) if str(item).strip()]
-    if plan_validations:
-      profile = dict(profile)
-      profile["conversion_validation"] = "; ".join(plan_validations)
+    profile = _apply_plan_overrides(profile, row)
     for scenario in scenarios:
       key = _price_cache_key(region, currency, scenario, billable_qty, source_unit, profile)
       requests_by_key.setdefault(
@@ -620,6 +757,38 @@ def _should_apply_hybrid_benefit(service: str, row: Dict[str, Any], specs: Dict[
   if service == "RDS" and "sql" in row_text and any("sql server" in item for item in licenses):
     return True
   return False
+
+
+def _build_pricing_metrics(comparison_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+  source_counts = {"API": 0, "WEB": 0, "CACHE": 0, "NONE": 0}
+  for row in comparison_rows:
+    source = str(row.get("source", "API"))
+    source_counts[source] = source_counts.get(source, 0) + 1
+  pricing_line_count = len(comparison_rows)
+  unresolved_count = source_counts.get("NONE", 0)
+  fallback_attempts = sum(1 for row in comparison_rows if row.get("fallback_attempted"))
+  fallback_successes = sum(1 for row in comparison_rows if row.get("fallback_succeeded"))
+  fallback_latency_ms = sum(float(row.get("fallback_latency_ms", 0.0)) for row in comparison_rows if row.get("fallback_attempted"))
+  return {
+    "sourceCounts": source_counts,
+    "pricingMetrics": {
+      "lineCount": pricing_line_count,
+      "unresolvedCount": unresolved_count,
+      "unresolvedRate": round(unresolved_count / pricing_line_count, 4) if pricing_line_count else 0.0,
+      "sourceCoverage": {
+        source: {
+          "count": count,
+          "rate": round(count / pricing_line_count, 4) if pricing_line_count else 0.0,
+        }
+        for source, count in sorted(source_counts.items())
+      },
+      "fallbackAttempts": fallback_attempts,
+      "fallbackSuccesses": fallback_successes,
+      "fallbackSuccessRate": round(fallback_successes / fallback_attempts, 4) if fallback_attempts else 0.0,
+      "fallbackLatencyMsTotal": round(fallback_latency_ms, 3),
+      "fallbackLatencyMsAverage": round(fallback_latency_ms / fallback_attempts, 3) if fallback_attempts else 0.0,
+    },
+  }
 
 
 def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], output_path: Path, scenario: str = "compare-all") -> Dict[str, Any]:
@@ -671,10 +840,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     azure_sku = str(row.get("Azure SKU", sku or "[VALIDATE]"))
     billable_qty = _billable_quantity(service, qty, capacity)
     profile = _price_profile(service, azure_service, azure_sku, capacity, sku)
-    plan_validations = [str(item) for item in row.get("Plan Validations", []) if str(item).strip()]
-    if plan_validations:
-      profile = dict(profile)
-      profile["conversion_validation"] = "; ".join(plan_validations)
+    profile = _apply_plan_overrides(profile, row)
 
     for s in target_scenarios:
       cache_key = _price_cache_key(region, currency, s, billable_qty, source_unit, profile)
@@ -696,6 +862,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
 
       # Final local fallback: use customer's Azure reference row when available.
       if live.get("validate") and (local_unit_price > 0 or local_total_cost > 0):
+        prior_fallback_latency = float(live.get("fallback_latency_ms", 0.0))
         local_monthly = local_total_cost if local_total_cost > 0 else local_unit_price * billable_qty
         local_unit = local_unit_price if local_unit_price > 0 else (local_monthly / billable_qty if billable_qty else 0.0)
         local_notes = ["[LOCAL_CACHE] from workbook Azure OPEX reference"]
@@ -713,6 +880,9 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
           "source": "CACHE",
           "source_links": [],
           "source_note": "; ".join(local_notes),
+          "fallback_attempted": True,
+          "fallback_succeeded": True,
+          "fallback_latency_ms": prior_fallback_latency,
         }
       unit_price = float(live["unit_price"])
       azure_monthly = float(live["monthly"])
@@ -784,12 +954,18 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
           "azure_monthly": None if live["validate"] else azure_monthly,
           "source": str(live.get("source", "API")),
           "source_links": list(live.get("source_links", [])),
+          "fallback_attempted": bool(live.get("fallback_attempted")),
+          "fallback_succeeded": bool(live.get("fallback_succeeded")),
+          "fallback_latency_ms": float(live.get("fallback_latency_ms", 0.0)),
         }
       )
 
   ws2 = wb.create_sheet("Cost Comparison")
   totals = {"aws": 0.0, "conservative": 0.0, "moderate": 0.0, "aggressive": 0.0}
   scenario_has_validate = {"conservative": False, "moderate": False, "aggressive": False}
+  # A tender still needs a defensible commercial envelope when one line is pending clarification,
+  # so the priced lines are subtotalled separately from the all-or-nothing headline total.
+  scenario_unpriced_counts = {"conservative": 0, "moderate": 0, "aggressive": 0}
   line_scenario_values: Dict[str, Dict[str, float | None]] = {}
 
   def _register_line_value(line: str, scenario_name: str, value: float | None) -> None:
@@ -854,14 +1030,17 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
       totals["aws"] += aws_val
       if cons is None:
         scenario_has_validate["conservative"] = True
+        scenario_unpriced_counts["conservative"] += 1
       else:
         totals["conservative"] += cons
       if mod is None:
         scenario_has_validate["moderate"] = True
+        scenario_unpriced_counts["moderate"] += 1
       else:
         totals["moderate"] += mod
       if agg is None:
         scenario_has_validate["aggressive"] = True
+        scenario_unpriced_counts["aggressive"] += 1
       else:
         totals["aggressive"] += agg
 
@@ -889,6 +1068,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   else:
     totals = {"aws": 0.0, "conservative": 0.0, "moderate": 0.0, "aggressive": 0.0}
     scenario_has_validate = {"conservative": False, "moderate": False, "aggressive": False}
+    scenario_unpriced_counts = {"conservative": 0, "moderate": 0, "aggressive": 0}
     ws2.append(["Line", "AWS Monthly", "Azure Monthly", "Savings $", "Savings %"])
     total_aws = 0.0
     total_az = 0.0
@@ -906,6 +1086,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
       total_aws += aws_val
       if az_val is None:
         scenario_has_validate[scenario] = True
+        scenario_unpriced_counts[scenario] += 1
       else:
         total_az += az_val
     totals["aws"] = total_aws
@@ -948,6 +1129,10 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
       if scenario_has_validate.get(scenario_name, False):
         ws4.append([f"{scenario_name} azure monthly", "N/A ([VALIDATE])"])
         ws4.append([f"{scenario_name} savings vs AWS", "N/A ([VALIDATE])"])
+        ws4.append([
+          f"{scenario_name} priced subtotal monthly",
+          f"{round(totals.get(scenario_name, 0.0), 2)} (excludes {scenario_unpriced_counts.get(scenario_name, 0)} line(s) pending validation)",
+        ])
       else:
         savings = totals["aws"] - totals[scenario_name]
         savings_pct = (savings / totals["aws"] * 100.0) if totals["aws"] else 0.0
@@ -992,18 +1177,20 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     })
   top_positive = sorted(driver_rows, key=lambda x: x["delta"], reverse=True)[:5]
   top_negative = sorted(driver_rows, key=lambda x: x["delta"])[:5]
-  source_counts = {"API": 0, "WEB": 0, "CACHE": 0, "NONE": 0}
-  for row in comparison_rows:
-    src = str(row.get("source", "API"))
-    source_counts[src] = source_counts.get(src, 0) + 1
+  pricing_telemetry = _build_pricing_metrics(comparison_rows)
 
   output_path.parent.mkdir(parents=True, exist_ok=True)
   wb.save(output_path)
 
   scenario_totals: Dict[str, Any] = {"aws": round(totals["aws"], 2)}
   scenario_savings: Dict[str, Any] = {}
+  priced_subtotals: Dict[str, Any] = {}
   for scenario_name in SCENARIOS:
     if scenario == "compare-all" or scenario == scenario_name:
+      priced_subtotals[scenario_name] = {
+        "amount": round(totals.get(scenario_name, 0.0), 2),
+        "unpricedLines": scenario_unpriced_counts.get(scenario_name, 0),
+      }
       if scenario_has_validate.get(scenario_name, False):
         scenario_totals[scenario_name] = "N/A ([VALIDATE])"
         scenario_savings[scenario_name] = "N/A ([VALIDATE])"
@@ -1022,6 +1209,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     "rows": len(aws_rows),
     "validateCount": validate_count,
     "scenarioTotalsMonthly": scenario_totals,
+    "scenarioPricedSubtotalsMonthly": priced_subtotals,
     "scenarioSavings": scenario_savings,
     "recommendedScenario": recommended_scenario or "N/A",
     "decisionConfidence": "High" if validate_count == 0 else ("Medium" if validate_count <= 5 else "Low"),
@@ -1047,7 +1235,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     "validationItems": validation_rows[:20],
     "validationItemsTruncated": len(validation_rows) > 20,
     "missingSpecFields": missing_fields,
-    "sourceCounts": source_counts,
+    **pricing_telemetry,
   }
   return summary
 

@@ -2,12 +2,18 @@ import argparse
 import copy
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 
 SCHEMA_VERSION = "1.0"
 SUPPORTED_PROVIDERS = {"aws", "azure", "gcp", "github", "external"}
+EVIDENCE_SOURCES = {"mcp-web", "search-api", "official-page", "manual"}
+EVIDENCE_REQUIRED_FIELDS = {
+  "source", "status", "provider", "service", "sku", "region", "currency",
+  "priceType", "meterName", "unitOfMeasure", "unitPrice", "retrievedAt", "evidenceUrl",
+}
 
 
 class QuotePlanError(ValueError):
@@ -49,6 +55,7 @@ def build_quote_plan(
       },
       "assumptions": [],
       "validations": [],
+      "pricingEvidence": [],
     })
   return {
     "schemaVersion": SCHEMA_VERSION,
@@ -85,6 +92,34 @@ def validate_quote_plan(plan: Dict[str, Any]) -> None:
       raise QuotePlanError(f"Line {line_id} validations must be a string array")
     if not isinstance(assumptions, list) or not all(isinstance(item, str) for item in assumptions):
       raise QuotePlanError(f"Line {line_id} assumptions must be a string array")
+    pricing_evidence = line.get("pricingEvidence", [])
+    if not isinstance(pricing_evidence, list):
+      raise QuotePlanError(f"Line {line_id} pricing evidence must be an array")
+    for evidence_index, evidence in enumerate(pricing_evidence, start=1):
+      if not isinstance(evidence, dict):
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} must be an object")
+      missing = sorted(EVIDENCE_REQUIRED_FIELDS - set(evidence))
+      if missing:
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} is missing: {', '.join(missing)}")
+      if evidence["source"] not in EVIDENCE_SOURCES or evidence["status"] != "approved":
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} must be approved from a supported source")
+      if evidence["provider"] != plan["targetProvider"]:
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} provider must match targetProvider")
+      for field in ["service", "sku", "region", "currency", "meterName", "unitOfMeasure"]:
+        if not isinstance(evidence[field], str) or not evidence[field].strip():
+          raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} {field} must be a non-empty string")
+      if evidence["priceType"] not in {"Consumption", "Reservation"}:
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} has an invalid priceType")
+      if not isinstance(evidence["unitPrice"], (int, float)) or isinstance(evidence["unitPrice"], bool) or evidence["unitPrice"] < 0:
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} unitPrice must be non-negative")
+      if not str(evidence["evidenceUrl"]).startswith("https://"):
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} evidenceUrl must use HTTPS")
+      try:
+        retrieved_at = datetime.fromisoformat(str(evidence["retrievedAt"]).replace("Z", "+00:00"))
+      except ValueError as exc:
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} retrievedAt must be ISO-8601") from exc
+      if retrieved_at.tzinfo is None:
+        raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} retrievedAt must include a timezone")
 
 
 def apply_quote_plan(normalized: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -110,6 +145,7 @@ def apply_quote_plan(normalized: Dict[str, Any], plan: Dict[str, Any]) -> Dict[s
       "Azure SKU": str(target.get("sku", row.get("Azure SKU", ""))),
       "Mapping Assumptions": list(line.get("assumptions", [])),
       "Plan Validations": list(line.get("validations", [])),
+      "Pricing Evidence": copy.deepcopy(line.get("pricingEvidence", [])),
       "Source Provider": str(source.get("provider", plan["sourceProvider"])),
       "Target Provider": str(target.get("provider", plan["targetProvider"])),
     })

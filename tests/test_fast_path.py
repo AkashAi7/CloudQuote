@@ -8,6 +8,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FastPathTests(unittest.TestCase):
+  def test_cloudquote_agent_has_guarded_web_fallback(self) -> None:
+    agent = (ROOT / ".github" / "agents" / "cloudquote.agent.md").read_text(encoding="utf-8")
+    skill = (ROOT / ".github" / "skills" / "cloudquote-boq" / "SKILL.md").read_text(encoding="utf-8")
+
+    self.assertIn("tools: [read, search, execute, web]", agent)
+    self.assertIn("--enable-web-search", skill)
+
   def test_csv_normalization_does_not_import_pandas(self) -> None:
     code = (
       "import sys; "

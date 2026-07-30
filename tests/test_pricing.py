@@ -33,23 +33,101 @@ class PricingCacheTests(unittest.TestCase):
       cache = json.loads(cache_path.read_text(encoding="utf-8"))
       self.assertEqual({"first", "second"}, set(cache))
 
-  def test_generic_web_search_is_disabled_by_default(self) -> None:
+  def test_api_miss_without_evidence_is_flagged(self) -> None:
     with patch("pricing.load_cache", return_value={}):
       with patch("pricing.fetch_prices", return_value=[]):
-        with patch("pricing._search_web_price") as web_search:
+        result = resolve_best_price(
+          region="eastus",
+          currency_code="USD",
+          service_name="Unknown",
+          sku_name=None,
+          meter_name=None,
+          price_type="Consumption",
+          reservation_term=None,
+        )
+
+    self.assertEqual("NONE", result["source"])
+    self.assertIn("approved pricing evidence", result["note"])
+
+  def test_legacy_web_flag_requires_mcp_or_search_api_evidence(self) -> None:
+    cached_miss = _with_cache_timestamp({"best": None, "links": [], "note": "cached miss"})
+    with patch("pricing.load_cache", return_value={"cached": cached_miss}):
+      with patch("pricing._resolved_cache_key", return_value="cached"):
+        with patch("pricing.fetch_prices", return_value=[]):
+          with patch("pricing._save_resolved_cache"):
+            result = resolve_best_price(
+              region="eastus",
+              currency_code="USD",
+              service_name="Unknown",
+              sku_name=None,
+              meter_name=None,
+              price_type="Consumption",
+              reservation_term=None,
+              enable_web_search=True,
+            )
+
+    self.assertEqual("NONE", result["source"])
+    self.assertIn("MCP or search-API", result["note"])
+
+  def test_cached_web_price_preserves_origin_source(self) -> None:
+    cached_web = _with_cache_timestamp({
+      "source": "WEB",
+      "best": {"retailPrice": 1.25, "unitOfMeasure": "Web Estimated Unit"},
+      "links": ["https://azure.microsoft.com/pricing/details/example"],
+    })
+    with patch("pricing.load_cache", return_value={"cached": cached_web}):
+      with patch("pricing._resolved_cache_key", return_value="cached"):
+        result = resolve_best_price(
+          region="eastus",
+          currency_code="USD",
+          service_name="Unknown",
+          sku_name=None,
+          meter_name=None,
+          price_type="Consumption",
+          reservation_term=None,
+          enable_web_search=True,
+        )
+
+    self.assertEqual("CACHE", result["source"])
+    self.assertEqual("WEB", result["originSource"])
+
+  def test_reviewed_evidence_resolves_after_api_miss(self) -> None:
+    evidence = [{
+      "source": "mcp-web",
+      "status": "approved",
+      "provider": "azure",
+      "service": "Virtual Machines",
+      "sku": "Standard_D4s_v5",
+      "region": "eastus",
+      "currency": "USD",
+      "priceType": "Consumption",
+      "meterName": "D4s v5",
+      "unitOfMeasure": "1 Hour",
+      "unitPrice": 0.192,
+      "retrievedAt": datetime.now(timezone.utc).isoformat(),
+      "evidenceUrl": "https://azure.microsoft.com/pricing/details/virtual-machines/",
+    }]
+    with patch("pricing.load_cache", return_value={}):
+      with patch("pricing.fetch_prices", return_value=[]):
+        with patch("pricing._save_resolved_cache"):
           result = resolve_best_price(
             region="eastus",
             currency_code="USD",
-            service_name="Unknown",
-            sku_name=None,
+            service_name="Virtual Machines",
+            sku_name="Standard_D4s_v5",
             meter_name=None,
             price_type="Consumption",
             reservation_term=None,
+            target_sku="Standard_D4s_v5",
+            reviewed_evidence=evidence,
+            enable_web_search=True,
           )
 
-    self.assertEqual("NONE", result["source"])
-    self.assertIn("disabled", result["note"])
-    web_search.assert_not_called()
+    self.assertEqual("EVIDENCE", result["source"])
+    self.assertEqual(0.192, result["best"]["retailPrice"])
+    self.assertTrue(result["fallbackAttempted"])
+    self.assertTrue(result["fallbackSucceeded"])
+    self.assertGreaterEqual(result["fallbackLatencyMs"], 0.0)
 
   @patch.dict("os.environ", {"CLOUDQUOTE_DEFER_CACHE_WRITES": "true"})
   def test_deferred_updates_flush_together(self) -> None:

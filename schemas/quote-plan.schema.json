@@ -19,7 +19,11 @@
           "source": {"$ref": "#/$defs/serviceLine"},
           "target": {"$ref": "#/$defs/serviceLine"},
           "assumptions": {"type": "array", "items": {"type": "string"}},
-          "validations": {"type": "array", "items": {"type": "string"}}
+          "validations": {"type": "array", "items": {"type": "string"}},
+          "pricingEvidence": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/pricingEvidence"}
+          }
         },
         "additionalProperties": false
       }
@@ -37,6 +41,28 @@
         "unit": {"type": "string"},
         "capacity": {"type": "string"},
         "monthlyCost": {"type": "number"}
+      },
+      "additionalProperties": false
+    },
+    "pricingEvidence": {
+      "type": "object",
+      "required": ["source", "status", "provider", "service", "sku", "region", "currency", "priceType", "meterName", "unitOfMeasure", "unitPrice", "retrievedAt", "evidenceUrl"],
+      "properties": {
+        "source": {"enum": ["mcp-web", "search-api", "official-page", "manual"]},
+        "status": {"const": "approved"},
+        "provider": {"enum": ["aws", "azure", "gcp", "github", "external"]},
+        "service": {"type": "string", "minLength": 1},
+        "sku": {"type": "string", "minLength": 1},
+        "region": {"type": "string", "minLength": 1},
+        "currency": {"type": "string", "minLength": 1},
+        "priceType": {"enum": ["Consumption", "Reservation"]},
+        "reservationTerm": {"enum": ["1 Year", "3 Years"]},
+        "meterName": {"type": "string", "minLength": 1},
+        "unitOfMeasure": {"type": "string", "minLength": 1},
+        "unitPrice": {"type": "number", "minimum": 0},
+        "retrievedAt": {"type": "string", "format": "date-time"},
+        "evidenceUrl": {"type": "string", "format": "uri", "pattern": "^https://"},
+        "notes": {"type": "string"}
       },
       "additionalProperties": false
     }

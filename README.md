@@ -58,7 +58,7 @@ python scripts\run_pipeline.py `
 
 Each sidecar is prefixed by the workbook name, preventing collisions when multiple quotes share a directory. Unchanged inputs and options reuse existing artifacts only after fingerprint, hash, JSON, and workbook-format validation. Price reuse expires after 24 hours by default.
 
-Generic search-engine pricing is disabled by default because it is slow and ambiguous. Official provider catalogs and the Azure Retail Prices API are used first; unresolved meters are flagged immediately. Unstructured web estimates can be enabled explicitly with `--enable-web-search`.
+Official provider catalogs and the Azure Retail Prices API are always used first. For unresolved reviewed-plan lines, the agent can supply approved MCP/search-API results through the typed `pricingEvidence` contract. The compiler never scrapes search-engine HTML. `--enable-web-search` remains as a compatibility flag that requires this reviewed evidence after official-source misses.
 
 Use `--price-cache <path>` to isolate pricing caches for separate environments or benchmark first-run behavior.
 
@@ -72,16 +72,25 @@ Reference measurements for the included samples on Python 3.12:
 - GitHub catalog build: about 2.3 seconds
 - Unchanged repeat build with integrity verification: under 1 second
 
-Cold Azure API performance varies with network and service response time. Generic search-engine fallback is opt-in.
+Cold Azure API performance varies with network and service response time. Generated summaries and run manifests report unresolved rate, source coverage, fallback success, and fallback latency.
 
 ## Pricing safety
 
-The pipeline uses Azure Retail Prices API results, timestamped cache fallback, and official public catalogs. GitHub Team and Enterprise prices resolve from [GitHub Pricing](https://github.com/pricing). It marks stale evidence, currency mismatches, unresolved mappings, composite-service omissions, and incompatible usage-to-meter conversions as `[VALIDATE]` instead of producing unsupported estimates.
+The pipeline uses Azure Retail Prices API results, timestamped cache fallback, and official public catalogs. GitHub Team and Enterprise prices resolve from [GitHub Pricing](https://github.com/pricing). It marks stale evidence, currency mismatches, unresolved mappings, composite-service omissions, incompatible usage-to-meter conversions, and unverified web estimates as `[VALIDATE]` instead of producing unsupported totals.
+
+Azure is the production compilation target. AWS and Google Cloud adapters validate provider-neutral quote plans and expose explicit capability gates; compilation remains blocked until their pricing and workbook backends are implemented.
 
 ## Tests
 
 ```powershell
 python -m unittest discover -s tests -v
+```
+
+Run the optional live Azure pricing canary with:
+
+```powershell
+$env:CLOUDQUOTE_LIVE_PRICING_CANARY = "true"
+python -m unittest tests.test_pricing_canary -v
 ```
 
 Customer workbooks, engagement outputs, local price caches, and generated summaries are excluded from Git.

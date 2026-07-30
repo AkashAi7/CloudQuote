@@ -1,5 +1,6 @@
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from providers.catalog import resolve_catalog_price
+from providers.evidence import resolve_reviewed_evidence
 from providers.targets import require_target_provider
 
 
@@ -23,6 +25,52 @@ class _Session:
 
 
 class ProviderTests(unittest.TestCase):
+  def _reviewed_evidence(self) -> dict:
+    return {
+      "source": "mcp-web",
+      "status": "approved",
+      "provider": "azure",
+      "service": "Virtual Machines",
+      "sku": "Standard_D4s_v5",
+      "region": "eastus",
+      "currency": "USD",
+      "priceType": "Consumption",
+      "meterName": "D4s v5",
+      "unitOfMeasure": "1 Hour",
+      "unitPrice": 0.192,
+      "retrievedAt": datetime.now(timezone.utc).isoformat(),
+      "evidenceUrl": "https://azure.microsoft.com/pricing/details/virtual-machines/",
+    }
+
+  def test_reviewed_evidence_requires_exact_dimensions(self) -> None:
+    result = resolve_reviewed_evidence(
+      [self._reviewed_evidence()],
+      provider="azure",
+      region="eastus",
+      currency="USD",
+      service="Virtual Machines",
+      sku="Standard_D4s_v5",
+      price_type="Consumption",
+      reservation_term=None,
+    )
+
+    self.assertEqual("EVIDENCE", result["source"])
+    self.assertEqual(0.192, result["best"]["retailPrice"])
+
+  def test_reviewed_evidence_rejects_region_mismatch(self) -> None:
+    result = resolve_reviewed_evidence(
+      [self._reviewed_evidence()],
+      provider="azure",
+      region="centralindia",
+      currency="USD",
+      service="Virtual Machines",
+      sku="Standard_D4s_v5",
+      price_type="Consumption",
+      reservation_term=None,
+    )
+
+    self.assertIsNone(result)
+
   def test_github_team_uses_official_per_user_price(self) -> None:
     result = resolve_catalog_price("github", "GitHub Team", 25, "USD", session=_Session())
 
@@ -72,9 +120,21 @@ class ProviderTests(unittest.TestCase):
     self.assertTrue(result["validate"])
     self.assertIn("stale", result["note"])
 
-  def test_unimplemented_target_provider_is_rejected(self) -> None:
+  def test_aws_and_gcp_adapters_support_plan_validation_only(self) -> None:
+    for provider in ["aws", "gcp"]:
+      adapter = require_target_provider(provider)
+      plan = {
+        "targetProvider": provider,
+        "lines": [{"target": {"provider": provider}}],
+      }
+      adapter.validate_plan(plan)
+      self.assertIn("plan", adapter.capabilities)
+      with self.assertRaisesRegex(ValueError, "pricing and workbook backend"):
+        adapter.require_capability("compile")
+
+  def test_unknown_target_provider_is_rejected(self) -> None:
     with self.assertRaisesRegex(ValueError, "not implemented"):
-      require_target_provider("gcp")
+      require_target_provider("external")
 
 
 if __name__ == "__main__":
