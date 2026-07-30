@@ -16,6 +16,7 @@ Completed:
 - [Executive summary](<executive summary path>)
 - [Structured summary](<summary JSON path>)
 - [Normalized inputs](<normalized JSON path>)
+- [Quote plan](<quote plan JSON path>)
 ```
 
 ## Rules

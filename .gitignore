@@ -16,6 +16,14 @@ normalized.json
 summary.json
 executive_summary.md
 .cloudquote-run.json
+*.cloudquote-run.json
+*.cloudquote.lock
+*.normalized.json
+*.quote-plan.json
+*.summary.json
+*.executive-summary.md
+*.plan-input.json
+*.tmp
 
 # Local agent tooling
 .agents/

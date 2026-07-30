@@ -1,28 +1,93 @@
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
+import zipfile
 
 
-def _run_fingerprint(specs_path: Path, aws_boq_path: Path, region: str, currency: str, scenario: str) -> str:
+def _run_fingerprint(
+  specs_path: Path,
+  aws_boq_path: Path,
+  region: str,
+  currency: str,
+  scenario: str,
+  quote_plan_path: Path | None = None,
+  normalized_input_path: Path | None = None,
+  max_price_age_hours: float = 24.0,
+) -> str:
   digest = hashlib.sha256()
   digest.update(json.dumps({
     "region": region,
     "currency": currency,
     "scenario": scenario,
+    "pricingFreshnessWindow": int(time.time() // max(1, max_price_age_hours * 3600)),
   }, sort_keys=True).encode("utf-8"))
   project_root = Path(__file__).resolve().parent.parent
   dependencies = [
     specs_path,
     aws_boq_path,
+    *([quote_plan_path] if quote_plan_path else []),
+    *([normalized_input_path] if normalized_input_path else []),
     *sorted((project_root / "scripts").glob("*.py")),
     *sorted((project_root / "mappings").glob("*.yaml")),
+    *sorted((project_root / "schemas").glob("*.json")),
   ]
   for path in dependencies:
     digest.update(str(path.resolve()).encode("utf-8"))
     digest.update(path.read_bytes())
   return digest.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+  digest = hashlib.sha256()
+  with path.open("rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+      digest.update(chunk)
+  return digest.hexdigest()
+
+
+def _artifacts_are_valid(manifest: dict, artifacts: dict[str, str]) -> bool:
+  hashes = manifest.get("artifactHashes")
+  if not isinstance(hashes, dict):
+    return False
+  try:
+    for name, raw_path in artifacts.items():
+      path = Path(raw_path)
+      if not path.is_file() or hashes.get(name) != _file_sha256(path):
+        return False
+      if name == "workbook" and not zipfile.is_zipfile(path):
+        return False
+      if name in {"normalized", "quotePlan", "summary"}:
+        json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, ValueError, json.JSONDecodeError):
+    return False
+  return True
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+  temporary = path.with_suffix(path.suffix + ".tmp")
+  temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+  temporary.replace(path)
+
+
+@contextmanager
+def _run_lock(path: Path, stale_after_seconds: int = 3600) -> Iterator[None]:
+  if path.exists() and time.time() - path.stat().st_mtime > stale_after_seconds:
+    path.unlink()
+  try:
+    with path.open("x", encoding="utf-8") as stream:
+      stream.write(json.dumps({"pid": os.getpid(), "startedAt": datetime.now(timezone.utc).isoformat()}))
+  except FileExistsError as exc:
+    raise RuntimeError(f"Another CloudQuote operation is writing {path.parent}") from exc
+  try:
+    yield
+  finally:
+    path.unlink(missing_ok=True)
 
 
 def _render_executive_summary(summary: dict) -> str:
@@ -101,49 +166,84 @@ def main() -> None:
   parser.add_argument("--region", default="eastus")
   parser.add_argument("--currency", default="USD")
   parser.add_argument("--scenario", default="compare-all", choices=["compare-all", "conservative", "moderate", "aggressive"])
+  parser.add_argument("--plan", help="Validated CloudQuote quote-plan.json supplied by the agent workflow")
+  parser.add_argument("--normalized-input", help="Previously normalized input to avoid duplicate parsing")
+  parser.add_argument("--max-price-age-hours", type=float, default=24.0)
   args = parser.parse_args()
 
   out_path = Path(args.output)
   out_path.parent.mkdir(parents=True, exist_ok=True)
-  normalized_path = out_path.parent / "normalized.json"
-  summary_path = out_path.parent / "summary.json"
-  executive_summary_path = out_path.parent / "executive_summary.md"
-  manifest_path = out_path.parent / ".cloudquote-run.json"
+  artifact_base = out_path.with_suffix("")
+  normalized_path = artifact_base.with_suffix(".normalized.json")
+  quote_plan_path = artifact_base.with_suffix(".quote-plan.json")
+  summary_path = artifact_base.with_suffix(".summary.json")
+  executive_summary_path = artifact_base.with_suffix(".executive-summary.md")
+  manifest_path = artifact_base.with_suffix(".cloudquote-run.json")
+  supplied_plan_path = Path(args.plan) if args.plan else None
+  supplied_normalized_path = Path(args.normalized_input) if args.normalized_input else None
   fingerprint = _run_fingerprint(
     Path(args.specs),
     Path(args.aws_boq),
     args.region,
     args.currency,
     args.scenario,
+    supplied_plan_path,
+    supplied_normalized_path,
+    args.max_price_age_hours,
   )
   artifacts = {
     "workbook": str(out_path),
     "normalized": str(normalized_path),
+    "quotePlan": str(quote_plan_path),
     "summary": str(summary_path),
     "executiveSummary": str(executive_summary_path),
   }
-  if manifest_path.exists() and all(Path(path).exists() for path in artifacts.values()):
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("fingerprint") == fingerprint:
+  if manifest_path.exists():
+    try:
+      manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+      manifest = {}
+    if manifest.get("fingerprint") == fingerprint and _artifacts_are_valid(manifest, artifacts):
       print(json.dumps({**artifacts, "reused": True}, indent=2))
       return
 
-  from build_workbook import build_workbook
-  from parse_inputs import normalize_inputs
+  lock_path = artifact_base.with_suffix(".cloudquote.lock")
+  with _run_lock(lock_path):
+    os.environ["CLOUDQUOTE_PRICE_CACHE_TTL_HOURS"] = str(args.max_price_age_hours)
+    from build_workbook import build_workbook
+    from parse_inputs import normalize_inputs
+    from providers.targets import require_target_provider
+    from quote_plan import apply_quote_plan, build_quote_plan, load_quote_plan, save_quote_plan
 
-  normalized = normalize_inputs(Path(args.specs), Path(args.aws_boq), normalized_path)
+    if supplied_normalized_path:
+      normalized = json.loads(supplied_normalized_path.read_text(encoding="utf-8"))
+    else:
+      normalized = normalize_inputs(Path(args.specs), Path(args.aws_boq), normalized_path)
+    if supplied_plan_path:
+      quote_plan = load_quote_plan(supplied_plan_path)
+    else:
+      quote_plan = build_quote_plan(normalized)
+    require_target_provider(str(quote_plan["targetProvider"])).validate_plan(quote_plan)
+    save_quote_plan(quote_plan, quote_plan_path)
+    normalized = apply_quote_plan(normalized, quote_plan)
+    _write_json_atomic(normalized_path, normalized)
 
-  pricing_date = datetime.now(timezone.utc).date().isoformat()
-  summary = build_workbook(
-    normalized=normalized,
-    pricing_meta={"region": args.region, "currency": args.currency, "pricingDate": pricing_date},
-    output_path=out_path,
-    scenario=args.scenario,
-  )
+    pricing_date = datetime.now(timezone.utc).date().isoformat()
+    summary = build_workbook(
+      normalized=normalized,
+      pricing_meta={"region": args.region, "currency": args.currency, "pricingDate": pricing_date},
+      output_path=out_path,
+      scenario=args.scenario,
+    )
 
-  summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-  executive_summary_path.write_text(_render_executive_summary(summary), encoding="utf-8")
-  manifest_path.write_text(json.dumps({"fingerprint": fingerprint}, indent=2), encoding="utf-8")
+    _write_json_atomic(summary_path, summary)
+    executive_summary_path.write_text(_render_executive_summary(summary), encoding="utf-8")
+    manifest = {
+      "fingerprint": fingerprint,
+      "completedAt": datetime.now(timezone.utc).isoformat(),
+      "artifactHashes": {name: _file_sha256(Path(path)) for name, path in artifacts.items()},
+    }
+    _write_json_atomic(manifest_path, manifest)
   print(json.dumps({**artifacts, "reused": False}, indent=2))
 
 

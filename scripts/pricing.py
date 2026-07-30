@@ -1,8 +1,11 @@
 import argparse
 import base64
 import json
+import os
 import re
-from datetime import datetime, timezone
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -15,6 +18,28 @@ WEB_SEARCH_ENDPOINT = "https://www.bing.com/search"
 DDG_SEARCH_ENDPOINT = "https://duckduckgo.com/html/"
 
 _CACHE_DATA: Dict[str, Any] | None = None
+DEFAULT_CACHE_TTL_HOURS = float(os.getenv("CLOUDQUOTE_PRICE_CACHE_TTL_HOURS", "24"))
+
+
+def _utc_now() -> datetime:
+  return datetime.now(timezone.utc)
+
+
+def _cache_entry_is_fresh(value: Any, max_age_hours: float = DEFAULT_CACHE_TTL_HOURS) -> bool:
+  if not isinstance(value, dict) or max_age_hours <= 0:
+    return False
+  cached_at = value.get("cachedAt")
+  if not cached_at:
+    return False
+  try:
+    timestamp = datetime.fromisoformat(str(cached_at).replace("Z", "+00:00"))
+  except ValueError:
+    return False
+  return _utc_now() - timestamp <= timedelta(hours=max_age_hours)
+
+
+def _with_cache_timestamp(value: Dict[str, Any]) -> Dict[str, Any]:
+  return {**value, "cachedAt": _utc_now().isoformat()}
 
 
 def _cache_key(
@@ -60,9 +85,45 @@ def load_cache(cache_path: Path = CACHE_PATH) -> Dict[str, Any]:
 
 def _write_cache(cache: Dict[str, Any], cache_path: Path = CACHE_PATH) -> None:
   global _CACHE_DATA
-  cache_path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+  temporary = cache_path.with_suffix(cache_path.suffix + f".{os.getpid()}.tmp")
+  temporary.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+  temporary.replace(cache_path)
   if cache_path == CACHE_PATH:
     _CACHE_DATA = cache
+
+
+@contextmanager
+def _cache_write_lock(cache_path: Path, timeout_seconds: float = 5.0):
+  lock_path = cache_path.with_suffix(cache_path.suffix + ".lock")
+  deadline = time.monotonic() + timeout_seconds
+  while True:
+    if lock_path.exists() and time.time() - lock_path.stat().st_mtime > 60:
+      lock_path.unlink(missing_ok=True)
+    try:
+      with lock_path.open("x", encoding="utf-8") as stream:
+        stream.write(str(os.getpid()))
+      break
+    except FileExistsError:
+      if time.monotonic() >= deadline:
+        raise RuntimeError(f"Timed out waiting for pricing cache lock: {lock_path}")
+      time.sleep(0.05)
+  try:
+    yield
+  finally:
+    lock_path.unlink(missing_ok=True)
+
+
+def _update_cache_entry(key: str, value: Dict[str, Any], cache_path: Path = CACHE_PATH) -> None:
+  global _CACHE_DATA
+  with _cache_write_lock(cache_path):
+    try:
+      cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+      cache = {}
+    cache[key] = value
+    _write_cache(cache, cache_path)
+    if cache_path == CACHE_PATH:
+      _CACHE_DATA = cache
 
 
 def _build_filter(region: str, service_name: str | None, sku_name: str | None, meter_name: str | None, price_type: str, reservation_term: str | None) -> str:
@@ -109,16 +170,14 @@ def fetch_prices(
     if response is None:
       if fallback_to_cache:
         cached = load_cache().get(cache_key)
-        if cached and isinstance(cached.get("items"), list):
+        if _cache_entry_is_fresh(cached) and isinstance(cached.get("items"), list):
           return cached["items"]
       raise last_error or RuntimeError("Azure Retail Prices API request failed")
     payload = response.json()
     items.extend(payload.get("Items", []))
     url = payload.get("NextPageLink")
 
-  cache = load_cache()
-  cache[cache_key] = {"items": items}
-  _write_cache(cache)
+  _update_cache_entry(cache_key, _with_cache_timestamp({"items": items}))
 
   return items
 
@@ -153,9 +212,7 @@ def _resolved_cache_key(
 
 
 def _save_resolved_cache(key: str, value: Dict[str, Any], cache_path: Path = CACHE_PATH) -> None:
-  cache = load_cache(cache_path)
-  cache[key] = value
-  _write_cache(cache, cache_path)
+  _update_cache_entry(key, _with_cache_timestamp(value), cache_path)
 
 
 def _extract_web_price(text: str) -> float | None:
@@ -395,7 +452,7 @@ def resolve_best_price(
   cache = load_cache()
 
   cached = cache.get(resolved_key)
-  if isinstance(cached, dict):
+  if _cache_entry_is_fresh(cached):
     cached_best = cached.get("best")
     cached_note = str(cached.get("note", ""))
     return {
@@ -549,11 +606,7 @@ def select_best_price(
 
 
 def save_cache(cache_path: Path, key: str, result: Dict[str, Any]) -> None:
-  cache: Dict[str, Any] = {}
-  if cache_path.exists():
-    cache = json.loads(cache_path.read_text(encoding="utf-8"))
-  cache[key] = result
-  cache_path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+  _update_cache_entry(key, result, cache_path)
 
 
 def main() -> None:

@@ -11,8 +11,9 @@ For every BOQ request:
 1. Load and follow `.github/skills/cloudquote-boq/SKILL.md`.
 2. Use its pricing-guardrail and artifact-delivery companion skills.
 3. Use agent reasoning for interpretation, mapping, assumptions, and validation.
-4. Use repository scripts only once as deterministic artifact compilers.
-5. Do not narrate normal execution or return analysis after success.
-6. On success, return only links to the final generated files.
+4. Record every mapping decision in the typed quote plan before compilation.
+5. Use repository scripts only for deterministic normalization, plan scaffolding, pricing, and artifact compilation.
+6. Do not narrate normal execution or return analysis after success.
+7. On success, return only links to the final generated files.
 
 Current implementation supports AWS-to-Azure. Preserve provider-neutral architecture for future AWS, Azure, and Google Cloud workflows.

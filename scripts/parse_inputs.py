@@ -97,6 +97,7 @@ def _infer_service(description: str, sku: str, explicit_service: str) -> str:
     "cloudfront": ["cloudfront", "cdn"],
     "redshift": ["redshift", "data warehouse"],
     "vpc": ["vpc", "vnet", "peering", "nat gateway", "private endpoint"],
+    "github": ["github team", "github enterprise", "github free", "github"],
   }
 
   for service, tokens in service_map.items():

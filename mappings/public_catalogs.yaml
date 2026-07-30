@@ -1,0 +1,24 @@
+catalogs:
+  github:
+    pricingUrl: https://github.com/pricing
+    currency: USD
+    unitOfMeasure: 1 User/Month
+    verifiedAt: "2026-07-30T00:00:00+00:00"
+    maxFallbackAgeHours: 168
+    aliases:
+      github free: free
+      github team: team
+      business: team
+      github enterprise: enterprise
+      enterprise cloud: enterprise
+    plans:
+      free:
+        displayName: GitHub Free
+        unitPrice: 0
+      team:
+        displayName: GitHub Team
+        unitPrice: 4
+      enterprise:
+        displayName: GitHub Enterprise
+        unitPrice: 21
+        startingAt: true

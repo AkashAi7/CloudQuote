@@ -14,6 +14,8 @@ The workflow is skill-driven:
 - `cloudquote-pricing-guardrails` blocks unsupported unit conversions.
 - `cloudquote-artifact-delivery` returns only the completed output files.
 
+Agent decisions are persisted in a schema-validated `quote-plan.json` before compilation, so mappings and validation assumptions directly affect generated artifacts.
+
 Provide:
 
 - Customer specifications in YAML, JSON, or DOCX format
@@ -26,6 +28,7 @@ The generated output includes:
 - An Excel workbook with mapping, costs, assumptions, executive summary, and validation tabs
 - `summary.json` for structured consumption
 - `executive_summary.md` for Copilot chat
+- `quote-plan.json` as the auditable agent-to-compiler contract
 
 ## Local setup
 
@@ -51,10 +54,16 @@ python scripts\run_pipeline.py `
 
 `--output` must be an `.xlsx` file path. The JSON and Markdown summaries are written beside it.
 
-Unchanged inputs and options reuse the existing artifacts through a content fingerprint, avoiding repeated parsing, pricing, and workbook generation.
+Each sidecar is prefixed by the workbook name, preventing collisions when multiple quotes share a directory. Unchanged inputs and options reuse existing artifacts only after fingerprint, hash, JSON, and workbook-format validation. Price reuse expires after 24 hours by default.
 
 ## Pricing safety
 
-The pipeline uses Azure Retail Prices API results with cache fallback. It marks unresolved mappings and incompatible usage-to-meter conversions as `[VALIDATE]` instead of producing unsupported estimates. Review the workbook's **Validation & Coverage** tab before using results for customer decisions.
+The pipeline uses Azure Retail Prices API results, timestamped cache fallback, and official public catalogs. GitHub Team and Enterprise prices resolve from [GitHub Pricing](https://github.com/pricing). It marks stale evidence, currency mismatches, unresolved mappings, composite-service omissions, and incompatible usage-to-meter conversions as `[VALIDATE]` instead of producing unsupported estimates.
+
+## Tests
+
+```powershell
+python -m unittest discover -s tests -v
+```
 
 Customer workbooks, engagement outputs, local price caches, and generated summaries are excluded from Git.

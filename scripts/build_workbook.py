@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from pricing import fetch_prices, resolve_best_price, select_best_price
+from providers import resolve_catalog_price
 import yaml
 
 
@@ -36,6 +37,8 @@ AWS_SERVICE_ALIASES = {
   "amazon cloudfront": "CloudFront",
   "vpc": "VPC",
   "amazon vpc": "VPC",
+  "github": "GitHub",
+  "github.com": "GitHub",
 }
 
 
@@ -116,6 +119,11 @@ def _extract_rw_units(text: str) -> float | None:
     return float(plain.group(1))
   return None
 
+
+def _extract_users(text: str) -> float | None:
+  match = re.search(r"(\d+(?:\.\d+)?)\s*(?:users?|seats?|licenses?)", text.lower())
+  return float(match.group(1)) if match else None
+
 def _billable_quantity(service: str, qty: float, capacity: str) -> float:
   lower = capacity.lower()
   if service == "EBS":
@@ -153,6 +161,9 @@ def _billable_quantity(service: str, qty: float, capacity: str) -> float:
     if rw is not None:
       # Cosmos autoscale meter is per 100 RU/s-hour equivalent in this sample mapping.
       return max(rw / 100.0, 1.0)
+  if service == "GitHub":
+    users = _extract_users(lower)
+    return users if users is not None else qty
   if service == "EKS":
     nodes = re.search(r"(\d+(?:\.\d+)?)\s*nodes", lower)
     if nodes:
@@ -205,6 +216,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "product_contains": "Premium SSD v2",
       "reservation_supported": False,
       "capacity_note": "IOPS and throughput surcharges may require validation.",
+      "conversion_validation": "Managed disk pricing is incomplete without tier, provisioned IOPS, and throughput assumptions",
     }
   if service == "S3":
     return {
@@ -215,6 +227,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "product_contains": "Block Blob",
       "reservation_supported": False,
       "capacity_note": "Transaction and redundancy surcharges may require validation.",
+      "conversion_validation": "Blob storage pricing is incomplete without redundancy, transaction, retrieval, and egress assumptions",
     }
   if service == "ALB" or "application" in source_sku.lower() or azure_service == "Azure Application Gateway":
     return {
@@ -225,7 +238,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "product_contains": "Application Gateway Standard v2",
       "reservation_supported": False,
       "capacity_note": "Capacity unit charges may require validation.",
-      "force_validate": False,
+      "conversion_validation": "Application Gateway pricing requires gateway hours, capacity units, and processed data",
     }
   if service == "ELB":
     return {
@@ -236,7 +249,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "product_contains": None,
       "reservation_supported": False,
       "capacity_note": "Data processed and rule dimensions may require validation.",
-      "force_validate": False,
+      "conversion_validation": "Load Balancer pricing requires rule hours and processed-data dimensions",
     }
   if service == "RDS":
     return {
@@ -247,6 +260,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "product_contains": "Flexible Server",
       "reservation_supported": False,
       "capacity_note": "Storage, backup, and HA overhead may require validation.",
+      "conversion_validation": "Database pricing is incomplete without storage, backup, high-availability, and compute-hour assumptions",
     }
   if service == "Lambda":
     return {
@@ -257,6 +271,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "product_contains": "Consumption",
       "reservation_supported": False,
       "capacity_note": "Execution duration and memory charges may require validation.",
+      "conversion_validation": "Function execution count alone is insufficient without execution duration and memory consumption",
     }
   if service == "DynamoDB":
     return {
@@ -289,7 +304,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
         "product_contains": "Managed Cluster",
       "reservation_supported": False,
       "capacity_note": "AKS worker node VM costs should be priced separately from cluster management.",
-      "force_validate": False,
+      "conversion_validation": "AKS management pricing excludes required worker-node compute and attached infrastructure",
     }
   if service == "Redshift":
     return {
@@ -300,7 +315,7 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "product_contains": "Dedicated SQL Pool",
       "reservation_supported": False,
       "capacity_note": "Synapse storage and query workload variability may require validation.",
-      "force_validate": False,
+      "conversion_validation": "Warehouse pricing requires a defensible source-capacity to DWU mapping plus storage assumptions",
     }
   if service == "VPC":
     return {
@@ -312,6 +327,19 @@ def _price_profile(service: str, azure_service: str, azure_sku: str, capacity: s
       "reservation_supported": False,
       "capacity_note": "VNet pricing is componentized (NAT, peering, egress, private endpoints) and requires validation.",
       "force_validate": True,
+    }
+  if service == "GitHub":
+    return {
+      "service_name": "GitHub",
+      "sku_name": azure_sku or source_sku,
+      "sku_candidates": [],
+      "meter_contains": None,
+      "product_contains": None,
+      "reservation_supported": False,
+      "capacity_note": "Official GitHub public catalog pricing; add-ons require separate lines.",
+      "pricing_provider": "official_catalog",
+      "catalog_name": "github",
+      "catalog_sku": azure_sku or source_sku,
     }
 
   return {
@@ -336,6 +364,13 @@ def _lookup_live_price(
   source_sku: str = "",
   capacity: str = "",
 ) -> Dict[str, Any]:
+  if profile.get("pricing_provider") == "official_catalog":
+    return resolve_catalog_price(
+      str(profile["catalog_name"]),
+      str(profile.get("catalog_sku", source_sku)),
+      billable_qty,
+      currency,
+    )
   if profile.get("force_validate"):
     return {
       "unit_price": 0.0,
@@ -555,6 +590,10 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     azure_sku = str(row.get("Azure SKU", sku or "[VALIDATE]"))
     billable_qty = _billable_quantity(service, qty, capacity)
     profile = _price_profile(service, azure_service, azure_sku, capacity, sku)
+    plan_validations = [str(item) for item in row.get("Plan Validations", []) if str(item).strip()]
+    if plan_validations:
+      profile = dict(profile)
+      profile["conversion_validation"] = "; ".join(plan_validations)
 
     for s in target_scenarios:
       cache_key = json.dumps(
@@ -636,6 +675,9 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
         notes = f"{notes}; {live['source_note']}" if notes else str(live["source_note"])
       if profile["capacity_note"]:
         notes = f"{notes}; {profile['capacity_note']}" if notes else profile["capacity_note"]
+      mapping_assumptions = [str(item) for item in row.get("Mapping Assumptions", []) if str(item).strip()]
+      if mapping_assumptions:
+        notes = f"{notes}; Assumptions: {'; '.join(mapping_assumptions)}" if notes else f"Assumptions: {'; '.join(mapping_assumptions)}"
       if live["price_date"] and not pricing_date:
         pricing_date = str(live["price_date"])[:10]
 
