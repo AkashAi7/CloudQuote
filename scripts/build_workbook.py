@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 from pathlib import Path
@@ -381,6 +382,22 @@ def _lookup_live_price(
       "note": "[VALIDATE] Componentized pricing required",
       "validate": True,
     }
+  conversion_validation = str(profile.get("conversion_validation", "")).strip()
+  if conversion_validation:
+    intended_meter = profile.get("meter_contains") or profile.get("product_contains") or "unspecified"
+    return {
+      "unit_price": 0.0,
+      "monthly": 0.0,
+      "annual": 0.0,
+      "uom": "",
+      "price_date": "",
+      "note": f"[VALIDATE] {conversion_validation}; intended meter filter: {intended_meter}",
+      "validate": True,
+      "resolved_sku": profile.get("sku_name") or source_sku,
+      "source": "NONE",
+      "source_links": [],
+      "source_note": "Pricing lookup skipped until required conversion assumptions are supplied",
+    }
 
   query = _scenario_price_query(scenario)
   if not profile["reservation_supported"]:
@@ -464,21 +481,6 @@ def _lookup_live_price(
 
   retail_price = float(best.get("retailPrice", 0.0))
   unit_of_measure = str(best.get("unitOfMeasure", ""))
-  conversion_validation = str(profile.get("conversion_validation", "")).strip()
-  if conversion_validation:
-    return {
-      "unit_price": retail_price,
-      "monthly": 0.0,
-      "annual": 0.0,
-      "uom": unit_of_measure,
-      "price_date": str(best.get("effectiveStartDate", "")),
-      "note": f"[VALIDATE] {conversion_validation}; resolved meter: {unit_of_measure or 'unknown'}",
-      "validate": True,
-      "resolved_sku": chosen_sku or str(best.get("skuName", "")),
-      "source": str(resolved.get("source", "API")) if resolved else "API",
-      "source_links": list(resolved.get("links", [])) if resolved else [],
-      "source_note": str(resolved.get("note", "")) if resolved else "",
-    }
   if str(query["price_type"]) == "Reservation":
     months = _reservation_months(query["reservation_term"])
     monthly = (retail_price / months) * billable_qty
@@ -518,6 +520,85 @@ def _lookup_live_price(
     "source_links": list(resolved.get("links", [])) if resolved else [],
     "source_note": str(resolved.get("note", "")) if resolved else "",
   }
+
+
+def _price_cache_key(
+  region: str,
+  currency: str,
+  scenario: str,
+  billable_qty: float,
+  source_unit: str,
+  profile: Dict[str, Any],
+) -> str:
+  return json.dumps(
+    {
+      "region": region,
+      "currency": currency,
+      "scenario": scenario,
+      "billable_qty": round(float(billable_qty), 6),
+      "source_unit": source_unit.lower(),
+      "service": profile.get("service_name", ""),
+      "sku": profile.get("sku_name", ""),
+      "sku_candidates": profile.get("sku_candidates", []),
+      "meter_contains": profile.get("meter_contains", ""),
+      "product_contains": profile.get("product_contains", ""),
+      "reservation_supported": bool(profile.get("reservation_supported", False)),
+      "force_validate": bool(profile.get("force_validate", False)),
+      "conversion_validation": profile.get("conversion_validation", ""),
+      "pricing_provider": profile.get("pricing_provider", ""),
+      "catalog_name": profile.get("catalog_name", ""),
+      "catalog_sku": profile.get("catalog_sku", ""),
+    },
+    sort_keys=True,
+  )
+
+
+def _prefetch_prices(
+  rows: List[Dict[str, Any]],
+  scenarios: List[str],
+  region: str,
+  currency: str,
+) -> Dict[str, Dict[str, Any]]:
+  requests_by_key: Dict[str, tuple] = {}
+  for row in rows:
+    service = _normalize_aws_service(str(row.get("Service", row.get("service", ""))))
+    sku = str(row.get("Instance/SKU", row.get("instance", row.get("sku", ""))))
+    qty = _num(row.get("Quantity", row.get("quantity", 1)))
+    source_unit = str(row.get("Source Unit", ""))
+    capacity = str(row.get("Capacity", f"Derived from {sku}"))
+    azure_service = str(row.get("Azure Service", "Azure mapped service"))
+    azure_sku = str(row.get("Azure SKU", sku or "[VALIDATE]"))
+    billable_qty = _billable_quantity(service, qty, capacity)
+    profile = _price_profile(service, azure_service, azure_sku, capacity, sku)
+    plan_validations = [str(item) for item in row.get("Plan Validations", []) if str(item).strip()]
+    if plan_validations:
+      profile = dict(profile)
+      profile["conversion_validation"] = "; ".join(plan_validations)
+    for scenario in scenarios:
+      key = _price_cache_key(region, currency, scenario, billable_qty, source_unit, profile)
+      requests_by_key.setdefault(
+        key,
+        (region, currency, profile, scenario, billable_qty, source_unit, sku, capacity),
+      )
+
+  if not requests_by_key:
+    return {}
+  with ThreadPoolExecutor(max_workers=min(6, len(requests_by_key))) as executor:
+    futures = {
+      key: executor.submit(
+        _lookup_live_price,
+        request[0],
+        request[1],
+        request[2],
+        request[3],
+        request[4],
+        source_unit=request[5],
+        source_sku=request[6],
+        capacity=request[7],
+      )
+      for key, request in requests_by_key.items()
+    }
+    return {key: future.result() for key, future in futures.items()}
 
 
 def _line_note(scenario: str, env: str, apply_hybrid_benefit: bool, uses_reservation: bool) -> str:
@@ -572,7 +653,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
 
   comparison_rows: List[Dict[str, Any]] = []
   validation_rows: List[Dict[str, Any]] = []
-  price_lookup_cache: Dict[str, Dict[str, Any]] = {}
+  price_lookup_cache = _prefetch_prices(aws_rows, target_scenarios, region, currency)
   validate_count = 0
   for row in aws_rows:
     service = _normalize_aws_service(str(row.get("Service", row.get("service", ""))))
@@ -596,24 +677,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
       profile["conversion_validation"] = "; ".join(plan_validations)
 
     for s in target_scenarios:
-      cache_key = json.dumps(
-        {
-          "region": region,
-          "currency": currency,
-          "scenario": s,
-          "billable_qty": round(float(billable_qty), 6),
-          "source_unit": (source_unit or "").lower(),
-          "service": profile.get("service_name", ""),
-          "sku": profile.get("sku_name", ""),
-          "sku_candidates": profile.get("sku_candidates", []),
-          "meter_contains": profile.get("meter_contains", ""),
-          "product_contains": profile.get("product_contains", ""),
-          "reservation_supported": bool(profile.get("reservation_supported", False)),
-          "force_validate": bool(profile.get("force_validate", False)),
-          "conversion_validation": profile.get("conversion_validation", ""),
-        },
-        sort_keys=True,
-      )
+      cache_key = _price_cache_key(region, currency, s, billable_qty, source_unit, profile)
       live = price_lookup_cache.get(cache_key)
       if live is None:
         live = _lookup_live_price(
@@ -627,29 +691,29 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
           capacity=capacity,
         )
 
-        # Final local fallback: use customer's Azure reference row when available.
-        if live.get("validate") and (local_unit_price > 0 or local_total_cost > 0):
-          local_monthly = local_total_cost if local_total_cost > 0 else local_unit_price * billable_qty
-          local_unit = local_unit_price if local_unit_price > 0 else (local_monthly / billable_qty if billable_qty else 0.0)
-          local_links: List[str] = []
-          local_notes = ["[LOCAL_CACHE] from workbook Azure OPEX reference"]
-          if row.get("Sr. No"):
-            local_notes.append(f"Row {row.get('Sr. No')}")
-          live = {
-            "unit_price": local_unit,
-            "monthly": local_monthly,
-            "annual": local_monthly * 12.0,
-            "uom": str(row.get("Source Unit", "")),
-            "price_date": pricing_meta.get("pricingDate", ""),
-            "note": "local_reference",
-            "validate": False,
-            "resolved_sku": str(row.get("Local Azure SKU", "")) or (azure_sku or sku),
-            "source": "CACHE",
-            "source_links": local_links,
-            "source_note": "; ".join(local_notes),
-          }
-
         price_lookup_cache[cache_key] = live
+      live = dict(live)
+
+      # Final local fallback: use customer's Azure reference row when available.
+      if live.get("validate") and (local_unit_price > 0 or local_total_cost > 0):
+        local_monthly = local_total_cost if local_total_cost > 0 else local_unit_price * billable_qty
+        local_unit = local_unit_price if local_unit_price > 0 else (local_monthly / billable_qty if billable_qty else 0.0)
+        local_notes = ["[LOCAL_CACHE] from workbook Azure OPEX reference"]
+        if row.get("Sr. No"):
+          local_notes.append(f"Row {row.get('Sr. No')}")
+        live = {
+          "unit_price": local_unit,
+          "monthly": local_monthly,
+          "annual": local_monthly * 12.0,
+          "uom": str(row.get("Source Unit", "")),
+          "price_date": pricing_meta.get("pricingDate", ""),
+          "note": "local_reference",
+          "validate": False,
+          "resolved_sku": str(row.get("Local Azure SKU", "")) or (azure_sku or sku),
+          "source": "CACHE",
+          "source_links": [],
+          "source_note": "; ".join(local_notes),
+        }
       unit_price = float(live["unit_price"])
       azure_monthly = float(live["monthly"])
       annual = float(live["annual"])

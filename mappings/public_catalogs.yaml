@@ -4,6 +4,7 @@ catalogs:
     currency: USD
     unitOfMeasure: 1 User/Month
     verifiedAt: "2026-07-30T00:00:00+00:00"
+    liveRefreshHours: 24
     maxFallbackAgeHours: 168
     aliases:
       github free: free

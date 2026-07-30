@@ -31,6 +31,13 @@ class ProviderTests(unittest.TestCase):
     self.assertFalse(result["validate"])
     self.assertEqual(["https://github.com/pricing"], result["source_links"])
 
+  def test_fresh_verified_catalog_skips_http_refresh(self) -> None:
+    with patch("providers.catalog._github_live_prices") as live_prices:
+      result = resolve_catalog_price("github", "GitHub Team", 25, "USD", session=_Session())
+
+    self.assertEqual(100, result["monthly"])
+    live_prices.assert_not_called()
+
   def test_catalog_currency_mismatch_is_flagged(self) -> None:
     result = resolve_catalog_price("github", "Team", 25, "INR", session=_Session())
 

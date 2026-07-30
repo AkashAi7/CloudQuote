@@ -1,18 +1,20 @@
 import argparse
+import csv
 import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List
 
-import pandas as pd
 import yaml
-from docx import Document
 
 
 def _read_aws_boq(path: Path) -> List[Dict[str, Any]]:
   if path.suffix.lower() == ".csv":
-    df = pd.read_csv(path)
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+      return [dict(row) for row in csv.DictReader(stream)]
   elif path.suffix.lower() == ".xlsx":
+    import pandas as pd
+
     xls = pd.ExcelFile(path, engine="openpyxl")
     preferred_sheet = None
     for sheet in xls.sheet_names:
@@ -31,6 +33,8 @@ def _read_aws_boq(path: Path) -> List[Dict[str, Any]]:
       preferred_sheet = xls.sheet_names[0]
     df = pd.read_excel(xls, sheet_name=preferred_sheet)
   else:
+    import pandas as pd
+
     df = pd.read_excel(path)
   return df.fillna("").to_dict(orient="records")
 
@@ -39,6 +43,8 @@ def _read_azure_reference_map(path: Path) -> Dict[str, Dict[str, Any]]:
   if path.suffix.lower() != ".xlsx":
     return {}
   try:
+    import pandas as pd
+
     xls = pd.ExcelFile(path, engine="openpyxl")
   except Exception:
     return {}
@@ -195,6 +201,8 @@ def _read_specs(path: Path) -> Dict[str, Any]:
   if suffix == ".json":
     return json.loads(path.read_text(encoding="utf-8"))
   if suffix == ".docx":
+    from docx import Document
+
     doc = Document(path)
     text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
     return {"raw_text": text}

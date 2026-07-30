@@ -1,28 +1,44 @@
+from __future__ import annotations
+
 import argparse
 import base64
 import json
 import os
 import re
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-import requests
+if TYPE_CHECKING:
+  import requests
 
 API_BASE = "https://prices.azure.com/api/retail/prices"
-CACHE_PATH = Path(__file__).resolve().parent.parent / "pricing_cache.json"
+DEFAULT_CACHE_PATH = Path(__file__).resolve().parent.parent / "pricing_cache.json"
+CACHE_PATH = Path(os.getenv("CLOUDQUOTE_PRICE_CACHE_PATH", str(DEFAULT_CACHE_PATH)))
 WEB_SEARCH_ENDPOINT = "https://www.bing.com/search"
 DDG_SEARCH_ENDPOINT = "https://duckduckgo.com/html/"
 
 _CACHE_DATA: Dict[str, Any] | None = None
+_CACHE_MUTEX = threading.Lock()
+_PENDING_CACHE: Dict[str, Any] = {}
+_HTTP_LOCAL = threading.local()
 DEFAULT_CACHE_TTL_HOURS = float(os.getenv("CLOUDQUOTE_PRICE_CACHE_TTL_HOURS", "24"))
 
 
 def _utc_now() -> datetime:
   return datetime.now(timezone.utc)
+
+
+def _new_session():
+  import requests
+
+  if not hasattr(_HTTP_LOCAL, "session"):
+    _HTTP_LOCAL.session = requests.Session()
+  return _HTTP_LOCAL.session
 
 
 def _cache_entry_is_fresh(value: Any, max_age_hours: float = DEFAULT_CACHE_TTL_HOURS) -> bool:
@@ -115,6 +131,16 @@ def _cache_write_lock(cache_path: Path, timeout_seconds: float = 5.0):
 
 def _update_cache_entry(key: str, value: Dict[str, Any], cache_path: Path = CACHE_PATH) -> None:
   global _CACHE_DATA
+  if os.getenv("CLOUDQUOTE_DEFER_CACHE_WRITES", "false").lower() in {"1", "true", "yes"}:
+    with _CACHE_MUTEX:
+      if _CACHE_DATA is None:
+        try:
+          _CACHE_DATA = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+        except (OSError, json.JSONDecodeError):
+          _CACHE_DATA = {}
+      _CACHE_DATA[key] = value
+      _PENDING_CACHE[key] = value
+    return
   with _cache_write_lock(cache_path):
     try:
       cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
@@ -124,6 +150,23 @@ def _update_cache_entry(key: str, value: Dict[str, Any], cache_path: Path = CACH
     _write_cache(cache, cache_path)
     if cache_path == CACHE_PATH:
       _CACHE_DATA = cache
+
+
+def flush_cache(cache_path: Path = CACHE_PATH) -> None:
+  global _CACHE_DATA
+  with _CACHE_MUTEX:
+    pending = dict(_PENDING_CACHE)
+    _PENDING_CACHE.clear()
+  if not pending:
+    return
+  with _cache_write_lock(cache_path):
+    try:
+      cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+      cache = {}
+    cache.update(pending)
+    _write_cache(cache, cache_path)
+    _CACHE_DATA = cache
 
 
 def _build_filter(region: str, service_name: str | None, sku_name: str | None, meter_name: str | None, price_type: str, reservation_term: str | None) -> str:
@@ -150,7 +193,7 @@ def fetch_prices(
   session: requests.Session | None = None,
   fallback_to_cache: bool = True,
 ) -> List[Dict[str, Any]]:
-  session = session or requests.Session()
+  session = session or _new_session()
   cache_key = _cache_key(region, currency_code, service_name, sku_name, meter_name, price_type, reservation_term)
   query_filter = _build_filter(region, service_name, sku_name, meter_name, price_type, reservation_term)
   url = f"{API_BASE}?$filter={quote(query_filter)}&currencyCode={currency_code}"
@@ -317,7 +360,7 @@ def _search_web_price(
   search_hint: str | None = None,
   session: requests.Session | None = None,
 ) -> Dict[str, Any]:
-  session = session or requests.Session()
+  session = session or _new_session()
   service_token = service_name or "Azure service"
   sku_token = sku_name or meter_name or "SKU"
   term_token = reservation_term or price_type
@@ -435,6 +478,7 @@ def resolve_best_price(
   product_contains: str | None = None,
   select_service_name: str | None = None,
   search_hint: str | None = None,
+  enable_web_search: bool | None = None,
 ) -> Dict[str, Any]:
   resolved_key = _resolved_cache_key(
     region,
@@ -493,6 +537,16 @@ def resolve_best_price(
     }
     _save_resolved_cache(resolved_key, resolved)
     return resolved
+
+  if enable_web_search is None:
+    enable_web_search = os.getenv("CLOUDQUOTE_ENABLE_WEB_SEARCH", "false").lower() in {"1", "true", "yes"}
+  if not enable_web_search:
+    return {
+      "source": "NONE",
+      "best": None,
+      "links": [],
+      "note": "[VALIDATE] Azure Retail Prices API did not resolve this meter; generic web estimates are disabled",
+    }
 
   web_attempt_links: List[str] = []
 

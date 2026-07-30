@@ -33,6 +33,22 @@ Do not ask confirmation when defaults or prompt inputs already provide these val
 
 ## Procedure
 
+### Fast path (default)
+
+For AWS-to-Azure requests with supplied input paths, run exactly one command without reading the files first:
+
+```powershell
+python scripts\run_pipeline.py --specs <specs> --aws-boq <boq> --output <output.xlsx> --region <region> --currency <currency> --scenario <scenario> --max-price-age-hours 24
+```
+
+The compiler normalizes inputs, creates the typed plan, applies executable pricing guardrails, resolves official sources, builds insights and Excel, verifies artifact integrity, and returns all final paths. Finish immediately using the artifact-delivery skill.
+
+Do not inspect the workbook, summaries, normalized JSON, or quote plan after a successful command. Their hashes and formats are already verified by the compiler.
+
+### Reviewed-plan path (only when needed)
+
+Use this path only when the user asks for mapping review, required target mappings are absent, or a non-default provider workflow is requested.
+
 1. Normalize the supplied files once:
 
 ```powershell
@@ -56,18 +72,19 @@ python scripts\run_pipeline.py --specs <specs> --aws-boq <boq> --normalized-inpu
 
 On Windows, if `python` is unavailable, locate Python with `Get-Command python, py` and use the resolved interpreter.
 
-7. Trust `reused: true` only when returned by the compiler; it verifies hashes and artifact formats.
-8. Verify the five returned paths exist. Inspect detailed contents only when generation fails or the user explicitly asks for analysis.
-9. Finish using the artifact-delivery skill.
+7. Trust returned paths; the compiler verifies hashes and artifact formats before completion.
+8. Finish using the artifact-delivery skill.
 
 ## Performance rules
 
 - Do not narrate normal workflow progress.
-- Normalize once and reuse the normalized artifact during compilation.
+- Prefer one compiler invocation over multiple inspection or preparation calls.
+- Do not inspect inputs before the fast path; executable validation owns routine checks.
 - Do not dump JSON, workbook rows, mappings, or pricing explanations into chat.
 - Do not rerun unchanged inputs. The compiler fingerprints inputs, options, mappings, and implementation.
 - Batch independent file inspection and validation operations.
 - Stop once the output files exist and are verified.
+- Generic Bing/DDG estimates are disabled by default because they are slow and ambiguous. Use `--enable-web-search` only when the user explicitly requests unstructured estimates.
 
 ## Boundaries
 

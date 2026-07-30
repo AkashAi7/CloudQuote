@@ -19,12 +19,16 @@ def _run_fingerprint(
   quote_plan_path: Path | None = None,
   normalized_input_path: Path | None = None,
   max_price_age_hours: float = 24.0,
+  enable_web_search: bool = False,
+  price_cache_path: Path | None = None,
 ) -> str:
   digest = hashlib.sha256()
   digest.update(json.dumps({
     "region": region,
     "currency": currency,
     "scenario": scenario,
+    "enableWebSearch": enable_web_search,
+    "priceCachePath": str(price_cache_path.resolve()) if price_cache_path else "default",
     "pricingFreshnessWindow": int(time.time() // max(1, max_price_age_hours * 3600)),
   }, sort_keys=True).encode("utf-8"))
   project_root = Path(__file__).resolve().parent.parent
@@ -169,6 +173,8 @@ def main() -> None:
   parser.add_argument("--plan", help="Validated CloudQuote quote-plan.json supplied by the agent workflow")
   parser.add_argument("--normalized-input", help="Previously normalized input to avoid duplicate parsing")
   parser.add_argument("--max-price-age-hours", type=float, default=24.0)
+  parser.add_argument("--enable-web-search", action="store_true", help="Allow slower unstructured web estimates after official sources fail")
+  parser.add_argument("--price-cache", help="Optional isolated pricing-cache path")
   args = parser.parse_args()
 
   out_path = Path(args.output)
@@ -190,6 +196,8 @@ def main() -> None:
     supplied_plan_path,
     supplied_normalized_path,
     args.max_price_age_hours,
+    args.enable_web_search,
+    Path(args.price_cache) if args.price_cache else None,
   )
   artifacts = {
     "workbook": str(out_path),
@@ -210,14 +218,19 @@ def main() -> None:
   lock_path = artifact_base.with_suffix(".cloudquote.lock")
   with _run_lock(lock_path):
     os.environ["CLOUDQUOTE_PRICE_CACHE_TTL_HOURS"] = str(args.max_price_age_hours)
+    os.environ["CLOUDQUOTE_ENABLE_WEB_SEARCH"] = "true" if args.enable_web_search else "false"
+    os.environ["CLOUDQUOTE_DEFER_CACHE_WRITES"] = "true"
+    if args.price_cache:
+      os.environ["CLOUDQUOTE_PRICE_CACHE_PATH"] = args.price_cache
     from build_workbook import build_workbook
-    from parse_inputs import normalize_inputs
     from providers.targets import require_target_provider
     from quote_plan import apply_quote_plan, build_quote_plan, load_quote_plan, save_quote_plan
 
     if supplied_normalized_path:
       normalized = json.loads(supplied_normalized_path.read_text(encoding="utf-8"))
     else:
+      from parse_inputs import normalize_inputs
+
       normalized = normalize_inputs(Path(args.specs), Path(args.aws_boq), normalized_path)
     if supplied_plan_path:
       quote_plan = load_quote_plan(supplied_plan_path)
@@ -235,6 +248,9 @@ def main() -> None:
       output_path=out_path,
       scenario=args.scenario,
     )
+    from pricing import flush_cache
+
+    flush_cache()
 
     _write_json_atomic(summary_path, summary)
     executive_summary_path.write_text(_render_executive_summary(summary), encoding="utf-8")

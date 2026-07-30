@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
-import requests
 import yaml
+
+if TYPE_CHECKING:
+  import requests
 
 
 CATALOG_PATH = Path(__file__).resolve().parents[2] / "mappings" / "public_catalogs.yaml"
@@ -12,6 +16,12 @@ CATALOG_PATH = Path(__file__).resolve().parents[2] / "mappings" / "public_catalo
 
 def _load_catalogs() -> Dict[str, Any]:
   return yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8")) or {}
+
+
+def _new_session():
+  import requests
+
+  return requests.Session()
 
 
 def _github_live_prices(url: str, session: requests.Session) -> Dict[str, float]:
@@ -61,9 +71,16 @@ def resolve_catalog_price(
   retrieved_at = str(catalog.get("verifiedAt", ""))
   source_note = "[OFFICIAL_CATALOG_FALLBACK]"
   live_resolved = False
-  if catalog_name.lower() == "github" and evidence_url:
+  try:
+    verified_at = datetime.fromisoformat(retrieved_at.replace("Z", "+00:00"))
+    refresh_due = datetime.now(timezone.utc) - verified_at > timedelta(
+      hours=float(catalog.get("liveRefreshHours", 24))
+    )
+  except ValueError:
+    refresh_due = True
+  if catalog_name.lower() == "github" and evidence_url and refresh_due:
     try:
-      live_prices = _github_live_prices(evidence_url, session or requests.Session())
+      live_prices = _github_live_prices(evidence_url, session or _new_session())
       if normalized_sku in live_prices:
         unit_price = live_prices[normalized_sku]
         retrieved_at = datetime.now(timezone.utc).isoformat()

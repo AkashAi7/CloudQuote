@@ -16,4 +16,4 @@ Inputs:
 - Scenario: `${input:scenario=compare-all}`
 - Output workbook: `${input:output_file=engagements/sample/cloudquote.xlsx}`
 
-Run the workflow without progress narration. Persist agent mapping decisions in the typed quote plan, apply pricing guardrails, and return only links to the completed workbook, executive summary, structured summary, normalized inputs, and quote plan.
+Use the one-command fast path without pre-reading inputs or post-reading outputs. Use reviewed planning only when mappings are missing or explicitly requested. Return only links to the completed workbook, executive summary, structured summary, normalized inputs, and quote plan.

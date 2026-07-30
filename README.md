@@ -16,6 +16,8 @@ The workflow is skill-driven:
 
 Agent decisions are persisted in a schema-validated `quote-plan.json` before compilation, so mappings and validation assumptions directly affect generated artifacts.
 
+Routine AWS-to-Azure requests use a single-command fast path. The agent only opens the reviewed-plan workflow when mappings are missing or review is explicitly requested.
+
 Provide:
 
 - Customer specifications in YAML, JSON, or DOCX format
@@ -55,6 +57,22 @@ python scripts\run_pipeline.py `
 `--output` must be an `.xlsx` file path. The JSON and Markdown summaries are written beside it.
 
 Each sidecar is prefixed by the workbook name, preventing collisions when multiple quotes share a directory. Unchanged inputs and options reuse existing artifacts only after fingerprint, hash, JSON, and workbook-format validation. Price reuse expires after 24 hours by default.
+
+Generic search-engine pricing is disabled by default because it is slow and ambiguous. Official provider catalogs and the Azure Retail Prices API are used first; unresolved meters are flagged immediately. Unstructured web estimates can be enabled explicitly with `--enable-web-search`.
+
+Use `--price-cache <path>` to isolate pricing caches for separate environments or benchmark first-run behavior.
+
+## Performance
+
+The default Copilot workflow uses one compiler command and returns only artifact links. CSV parsing and HTTP dependencies are lazy-loaded, independent price lookups are bounded, validation-only lines skip network calls, and pricing-cache writes are batched.
+
+Reference measurements for the included samples on Python 3.12:
+
+- Standard first build with warm pricing cache: about 3.3 seconds
+- GitHub catalog build: about 2.3 seconds
+- Unchanged repeat build with integrity verification: under 1 second
+
+Cold Azure API performance varies with network and service response time. Generic search-engine fallback is opt-in.
 
 ## Pricing safety
 

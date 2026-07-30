@@ -10,9 +10,9 @@ For every BOQ request:
 
 1. Load and follow `.github/skills/cloudquote-boq/SKILL.md`.
 2. Use its pricing-guardrail and artifact-delivery companion skills.
-3. Use agent reasoning for interpretation, mapping, assumptions, and validation.
-4. Record every mapping decision in the typed quote plan before compilation.
-5. Use repository scripts only for deterministic normalization, plan scaffolding, pricing, and artifact compilation.
+3. Use the single-command fast path unless reviewed planning is explicitly required.
+4. Do not inspect inputs or generated artifacts before the fast-path command.
+5. Use reviewed planning only for missing mappings, explicit review requests, or non-default provider workflows.
 6. Do not narrate normal execution or return analysis after success.
 7. On success, return only links to the final generated files.
 
