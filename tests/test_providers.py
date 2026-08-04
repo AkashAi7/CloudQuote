@@ -1,3 +1,4 @@
+import copy
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -80,7 +81,7 @@ class ProviderTests(unittest.TestCase):
     self.assertEqual(["https://github.com/pricing"], result["source_links"])
 
   def test_fresh_verified_catalog_skips_http_refresh(self) -> None:
-    catalogs = _load_catalogs()
+    catalogs = copy.deepcopy(_load_catalogs())
     catalogs["catalogs"]["github"]["verifiedAt"] = datetime.now(timezone.utc).isoformat()
     with (
       patch("providers.catalog._load_catalogs", return_value=catalogs),
