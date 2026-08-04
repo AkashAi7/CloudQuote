@@ -148,6 +148,26 @@ def _render_executive_summary(summary: dict) -> str:
     lines.append("- None")
   lines.append("")
 
+  composite = [
+    item for item in summary.get("serviceEquivalence", [])
+    if item.get("type") in {"composite", "partial"}
+  ]
+  if composite:
+    lines.append("## Composite Service Equivalence")
+    for item in composite[:5]:
+      components = ", ".join(item.get("components", []))
+      if item.get("type") == "partial":
+        lines.append(
+          f"- {item.get('sourceLine', '')}: only part of {components} on {item.get('targetProvider', '')}; "
+          "remaining components must be quoted separately"
+        )
+      else:
+        lines.append(
+          f"- {item.get('sourceLine', '')}: no single {item.get('targetProvider', '')} equivalent; "
+          f"covered by {components}"
+        )
+    lines.append("")
+
   lines.append("## Risks and Validation")
   missing = summary.get("missingSpecFields", [])
   if missing:

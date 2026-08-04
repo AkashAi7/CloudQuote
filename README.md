@@ -27,10 +27,25 @@ Provide:
 
 The generated output includes:
 
-- An Excel workbook with mapping, costs, assumptions, executive summary, and validation tabs
+- An Excel workbook with mapping, costs, assumptions, executive summary, service-equivalence, and validation tabs
 - `summary.json` for structured consumption
 - `executive_summary.md` for Copilot chat
 - `quote-plan.json` as the auditable agent-to-compiler contract
+
+## Service search and cross-provider equivalence
+
+Not every product has a one-to-one equivalent on another cloud. `mappings/service_equivalence.yaml` records direct equivalents and composite ones, where several products together cover a single product's capability (for example Microsoft Fabric maps to Amazon Redshift, AWS Glue, Amazon S3, Amazon Kinesis Data Analytics, and Amazon QuickSight).
+
+`scripts/service_search.py` searches that catalog by product name, alias, or capability keyword, and resolves equivalents in either direction, so an Azure-sourced BOQ or RFP can be converted to AWS products and an AWS BOQ can be converted to Azure:
+
+```powershell
+python scripts\service_search.py fabric --target-provider aws
+python scripts\service_search.py "data governance" --target-provider aws --format csv --output engagements\sample\fabric-equivalents.csv
+```
+
+Composite results are never presented as a like-for-like replacement: each component is listed with the capability it covers, and the line carries a `[VALIDATE]` note stating that every component must be priced separately. The generated workbook reports the same information on the `Service Equivalence` tab, and `summary.json` exposes it as `serviceEquivalence`. Use the CSV output when a special scenario needs the breakdown outside the workbook.
+
+The catalog is maintained in the repository rather than read from a provider pricing API, so equivalence resolution works even when an API cannot answer the question.
 
 ## Local setup
 
