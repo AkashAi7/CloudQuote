@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from providers.catalog import resolve_catalog_price
+from providers.catalog import _load_catalogs, resolve_catalog_price
 from providers.evidence import resolve_reviewed_evidence
 from providers.targets import require_target_provider
 
@@ -80,7 +80,12 @@ class ProviderTests(unittest.TestCase):
     self.assertEqual(["https://github.com/pricing"], result["source_links"])
 
   def test_fresh_verified_catalog_skips_http_refresh(self) -> None:
-    with patch("providers.catalog._github_live_prices") as live_prices:
+    catalogs = _load_catalogs()
+    catalogs["catalogs"]["github"]["verifiedAt"] = datetime.now(timezone.utc).isoformat()
+    with (
+      patch("providers.catalog._load_catalogs", return_value=catalogs),
+      patch("providers.catalog._github_live_prices") as live_prices,
+    ):
       result = resolve_catalog_price("github", "GitHub Team", 25, "USD", session=_Session())
 
     self.assertEqual(100, result["monthly"])
