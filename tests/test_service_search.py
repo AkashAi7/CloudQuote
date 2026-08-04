@@ -65,11 +65,12 @@ class ServiceSearchTests(unittest.TestCase):
     self.assertIn("Amazon QuickSight", [component["name"] for component in resolution["components"]])
 
   def test_csv_export_emits_one_row_per_component(self) -> None:
-    rendered = to_csv([resolve_equivalents("fabric", "aws")])
+    resolution = resolve_equivalents("fabric", "aws")
+    rendered = to_csv([resolution])
     body = [line for line in rendered.strip().splitlines() if line]
 
     self.assertIn("Target component", body[0])
-    self.assertEqual(6, len(body))
+    self.assertEqual(len(resolution["components"]) + 1, len(body))
 
 
 if __name__ == "__main__":

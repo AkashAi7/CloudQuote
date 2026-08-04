@@ -106,6 +106,10 @@ def _infer_service(description: str, sku: str, explicit_service: str) -> str:
     "github": ["github team", "github enterprise", "github free", "github"],
   }
 
+  # Target-provider wording is recognised so an Azure-worded BOQ or RFP still routes to a
+  # pricing profile. Composite products (Front Door, Virtual Network, AKS) resolve to their
+  # primary component here; the equivalence resolver reports the remaining components and
+  # their [VALIDATE] note, and the composite pricing profiles block a total either way.
   for service, tokens in service_map.items():
     if any(token in haystack for token in tokens):
       return service
