@@ -64,6 +64,35 @@ class ServiceSearchTests(unittest.TestCase):
     self.assertEqual("composite", resolution["type"])
     self.assertIn("Amazon QuickSight", [component["name"] for component in resolution["components"]])
 
+  def test_typo_still_resolves_to_the_right_product(self) -> None:
+    self.assertEqual("Microsoft Fabric", search_services("fabrik")[0]["name"])
+
+  def test_plural_and_spacing_variants_rank_the_same_product_first(self) -> None:
+    for query in ["virtual machine", "virtual machines", "  Virtual   Machines  "]:
+      with self.subTest(query=query):
+        self.assertEqual("Azure Virtual Machines", search_services(query)[0]["name"])
+
+  def test_single_letter_and_empty_queries_match_nothing(self) -> None:
+    for query in ["", "   ", "a", "the cloud service"]:
+      with self.subTest(query=query):
+        self.assertEqual([], search_services(query))
+
+  def test_non_positive_limit_returns_no_matches(self) -> None:
+    self.assertEqual([], search_services("fabric", limit=0))
+
+  def test_capability_keyword_prefers_the_specialised_product(self) -> None:
+    self.assertEqual("Microsoft Purview", search_services("data governance")[0]["name"])
+
+  def test_malformed_catalog_entries_do_not_break_search(self) -> None:
+    catalog = [
+      {"name": "Broken", "provider": "azure", "equivalents": {"aws": {"components": [None, "junk"]}}},
+      {"name": "Azure Widget", "provider": "azure", "aliases": ["widget"], "equivalents": None},
+    ]
+
+    self.assertEqual("Azure Widget", search_services("widget", catalog=catalog)[0]["name"])
+    self.assertEqual([], reverse_lookup("anything", source_provider="azure", catalog=catalog))
+
+
   def test_csv_export_emits_one_row_per_component(self) -> None:
     resolution = resolve_equivalents("fabric", "aws")
     rendered = to_csv([resolution])

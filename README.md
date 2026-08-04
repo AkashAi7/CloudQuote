@@ -47,6 +47,8 @@ Composite results are never presented as a like-for-like replacement: each compo
 
 The catalog is maintained in the repository rather than read from a provider pricing API, so equivalence resolution works even when an API cannot answer the question.
 
+Search matching is deliberately conservative so a wrong product is never quoted: queries are stemmed (so `virtual machine` and `Virtual Machines` rank identically), matched on word boundaries rather than raw substrings, tolerant of small typos (`fabrik` still resolves to Microsoft Fabric), and scored in proportion to how much of the query a candidate explains. Queries that carry no discriminating signal (empty, single-character, or stopwords only) return no matches rather than an arbitrary product, which surfaces as a `[VALIDATE]` note requiring agent research.
+
 ## Local setup
 
 Requires Python 3.10 or later.
@@ -74,6 +76,8 @@ python scripts\run_pipeline.py `
 Each sidecar is prefixed by the workbook name, preventing collisions when multiple quotes share a directory. Unchanged inputs and options reuse existing artifacts only after fingerprint, hash, JSON, and workbook-format validation. Price reuse expires after 24 hours by default.
 
 Official provider catalogs and the Azure Retail Prices API are always used first. For unresolved reviewed-plan lines, the agent can supply approved MCP/search-API results through the typed `pricingEvidence` contract. The compiler never scrapes search-engine HTML. `--enable-web-search` remains as a compatibility flag that requires this reviewed evidence after official-source misses.
+
+The one live fetch the compiler performs is a refresh of an official published catalog page (for example GitHub's pricing page) when the verified snapshot is older than `liveRefreshHours`. That fetch is restricted to HTTPS, retried with exponential backoff, rejected if the response is empty, oversized, or not HTML, and the parsed price is discarded when it deviates by more than 5x from the verified catalog price. Any of those conditions degrades to the verified catalog fallback instead of quoting an unreliable figure.
 
 Use `--price-cache <path>` to isolate pricing caches for separate environments or benchmark first-run behavior.
 

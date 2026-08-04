@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import html
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict
+from urllib.parse import urlparse
 
 import yaml
 
@@ -18,27 +21,92 @@ def _load_catalogs() -> Dict[str, Any]:
   return yaml.safe_load(CATALOG_PATH.read_text(encoding="utf-8")) or {}
 
 
+LIVE_FETCH_TIMEOUT_SECONDS = 20
+LIVE_FETCH_ATTEMPTS = 3
+LIVE_FETCH_BACKOFF_SECONDS = 0.5
+# Guard against an unexpectedly large or non-HTML response being regex-scanned.
+LIVE_FETCH_MAX_BYTES = 4 * 1024 * 1024
+# A live price that deviates this far from the verified catalog price is treated
+# as a parsing artefact rather than a genuine change, and is discarded.
+LIVE_PRICE_MAX_DEVIATION = 5.0
+ALLOWED_LIVE_SCHEMES = {"https"}
+
+
 def _new_session():
   import requests
 
   return requests.Session()
 
 
+def _fetch_live_page(url: str, session: requests.Session) -> str:
+  """Fetch a public pricing page with retries, scheme and size validation."""
+  parsed = urlparse(url)
+  if parsed.scheme not in ALLOWED_LIVE_SCHEMES or not parsed.netloc:
+    raise ValueError(f"Refusing to fetch pricing page over unsupported URL: {url}")
+
+  last_error: Exception | None = None
+  for attempt in range(LIVE_FETCH_ATTEMPTS):
+    try:
+      response = session.get(
+        url,
+        timeout=LIVE_FETCH_TIMEOUT_SECONDS,
+        headers={"User-Agent": "CloudQuote/1.0", "Accept": "text/html"},
+      )
+      response.raise_for_status()
+      content_type = str(getattr(response, "headers", {}).get("Content-Type", "") or "")
+      if content_type and "html" not in content_type.lower() and "text" not in content_type.lower():
+        raise ValueError(f"Unexpected content type for pricing page: {content_type}")
+      text = response.text or ""
+      if len(text) > LIVE_FETCH_MAX_BYTES:
+        raise ValueError("Pricing page response exceeded the maximum supported size")
+      if not text.strip():
+        raise ValueError("Pricing page response was empty")
+      return text
+    except Exception as error:  # retried below; the caller degrades to the catalog fallback
+      last_error = error
+      if attempt + 1 < LIVE_FETCH_ATTEMPTS:
+        time.sleep(LIVE_FETCH_BACKOFF_SECONDS * (2**attempt))
+  raise last_error if last_error else RuntimeError("Pricing page fetch failed")
+
+
 def _github_live_prices(url: str, session: requests.Session) -> Dict[str, float]:
-  response = session.get(url, timeout=20, headers={"User-Agent": "CloudQuote/1.0"})
-  response.raise_for_status()
-  text = re.sub(r"<[^>]+>", " ", response.text)
+  raw = _fetch_live_page(url, session)
+  text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", raw)
+  text = re.sub(r"<[^>]+>", " ", text)
+  text = html.unescape(text)
   text = re.sub(r"\s+", " ", text)
   prices: Dict[str, float] = {}
   for plan in ["Free", "Team", "Enterprise"]:
     match = re.search(
-      rf"\b{plan}\b.{{0,500}}?\$\s*([0-9]+(?:\.[0-9]+)?)\s*USD\s*per user/month",
+      rf"\b{plan}\b.{{0,500}}?\$\s*([0-9]+(?:\.[0-9]+)?)\s*USD\s*per user\s*/\s*month",
       text,
       flags=re.IGNORECASE,
     )
-    if match:
-      prices[plan.lower()] = float(match.group(1))
+    if not match:
+      continue
+    try:
+      value = float(match.group(1))
+    except ValueError:
+      continue
+    if value < 0:
+      continue
+    prices[plan.lower()] = value
   return prices
+
+
+def _live_price_is_plausible(live_price: float, catalog_price: float) -> bool:
+  """Reject scraped prices that differ implausibly from the verified catalog.
+
+  A parsing artefact (matching the wrong plan block, or a marketing figure) shows
+  up as an order-of-magnitude jump, so those are discarded in favour of the
+  verified fallback price rather than silently quoted.
+  """
+  if live_price < 0:
+    return False
+  if catalog_price <= 0:
+    return live_price == 0
+  ratio = live_price / catalog_price
+  return 1.0 / LIVE_PRICE_MAX_DEVIATION <= ratio <= LIVE_PRICE_MAX_DEVIATION
 
 
 def resolve_catalog_price(
@@ -68,6 +136,7 @@ def resolve_catalog_price(
     }
 
   unit_price = float(plan["unitPrice"])
+  catalog_price = unit_price
   retrieved_at = str(catalog.get("verifiedAt", ""))
   source_note = "[OFFICIAL_CATALOG_FALLBACK]"
   live_resolved = False
@@ -81,8 +150,9 @@ def resolve_catalog_price(
   if catalog_name.lower() == "github" and evidence_url and refresh_due:
     try:
       live_prices = _github_live_prices(evidence_url, session or _new_session())
-      if normalized_sku in live_prices:
-        unit_price = live_prices[normalized_sku]
+      live_price = live_prices.get(normalized_sku)
+      if live_price is not None and _live_price_is_plausible(live_price, catalog_price):
+        unit_price = live_price
         retrieved_at = datetime.now(timezone.utc).isoformat()
         source_note = "[OFFICIAL_CATALOG_LIVE]"
         live_resolved = True

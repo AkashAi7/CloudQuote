@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import difflib
 import io
 import json
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Set
 
 import yaml
 
@@ -37,70 +38,147 @@ CATALOG_PATH = Path(__file__).resolve().parent.parent / "mappings" / "service_eq
 STOPWORDS = {"service", "services", "cloud", "azure", "aws", "amazon", "microsoft", "google", "for", "and", "the"}
 MIN_MATCH_SCORE = 2.0
 
+# Below this length a token is too generic to be matched loosely; it must match a
+# whole token exactly so a query such as "a" or "s" cannot match every product.
+MIN_FUZZY_TOKEN_LENGTH = 4
+FUZZY_RATIO = 0.82
+
+
+
+def _stem(token: str) -> str:
+  if len(token) >= 5 and token.endswith("es") and token[-3] in "sxzoh":
+    return token[:-2]
+  if len(token) >= 3 and token.endswith("s") and not token.endswith("ss"):
+    return token[:-1]
+  return token
+
 
 def _tokens(text: str) -> List[str]:
   return [
-    token
+    _stem(token)
     for token in re.split(r"[^a-z0-9]+", (text or "").lower())
     if token and token not in STOPWORDS
   ]
 
 
-@lru_cache(maxsize=1)
+def _normalize(text: str) -> str:
+  """Whitespace-joined stemmed tokens, so plural/spacing variants compare equal."""
+  return " ".join(_tokens(text))
+
+
+def _contains_phrase(haystack: str, needle: str) -> bool:
+  """Substring match that respects word boundaries and ignores tiny needles.
+
+  Both sides are normalized first so "virtual machine" matches "Azure Virtual
+  Machines" without relying on exact surface spelling.
+  """
+  haystack_norm = _normalize(haystack)
+  needle_norm = _normalize(needle)
+  if len(needle_norm) < 2 or not haystack_norm:
+    return False
+  return re.search(rf"(?<![a-z0-9]){re.escape(needle_norm)}(?![a-z0-9])", haystack_norm) is not None
+
+
+def _fuzzy_overlap(query_tokens: Set[str], value_tokens: Set[str]) -> bool:
+  """True when a query token is a near-miss (typo) of a value token."""
+  candidates = [token for token in value_tokens if len(token) >= MIN_FUZZY_TOKEN_LENGTH]
+  if not candidates:
+    return False
+  for token in query_tokens:
+    if len(token) < MIN_FUZZY_TOKEN_LENGTH:
+      continue
+    if difflib.get_close_matches(token, candidates, n=1, cutoff=FUZZY_RATIO):
+      return True
+  return False
+
+
+@lru_cache(maxsize=8)
 def load_catalog(path: str | None = None) -> List[Dict[str, Any]]:
   catalog_path = Path(path) if path else CATALOG_PATH
   if not catalog_path.exists():
     return []
-  data = yaml.safe_load(catalog_path.read_text(encoding="utf-8")) or {}
-  return [entry for entry in data.get("services", []) if isinstance(entry, dict)]
+  try:
+    data = yaml.safe_load(catalog_path.read_text(encoding="utf-8")) or {}
+  except yaml.YAMLError:
+    return []
+  if not isinstance(data, dict):
+    return []
+  services = data.get("services")
+  if not isinstance(services, list):
+    return []
+  return [entry for entry in services if isinstance(entry, dict)]
 
 
 def _entry_haystacks(entry: Dict[str, Any]) -> Dict[str, List[str]]:
   return {
     "name": [str(entry.get("name", "")).lower()],
-    "aliases": [str(item).lower() for item in entry.get("aliases", [])],
-    "keywords": [str(item).lower() for item in entry.get("keywords", [])],
+    "aliases": [str(item).lower() for item in entry.get("aliases") or []],
+    "keywords": [str(item).lower() for item in entry.get("keywords") or []],
     "components": [
-      str(component.get("name", "")).lower()
-      for equivalent in entry.get("equivalents", {}).values()
-      for component in equivalent.get("components", [])
+      value
+      for equivalent in (entry.get("equivalents") or {}).values()
+      for component in ((equivalent or {}).get("components") or [])
+      if isinstance(component, dict)
+      for value in (
+        str(component.get("name", "")).lower(),
+        str(component.get("service", "")).lower(),
+        str(component.get("covers", "")).lower(),
+      )
+      if value
     ],
   }
 
 
 def _score(entry: Dict[str, Any], query: str) -> float:
-  query_lower = query.strip().lower()
+  query_lower = " ".join(str(query or "").lower().split())
   if not query_lower:
     return 0.0
   query_tokens = set(_tokens(query_lower))
+  if not query_tokens:
+    return 0.0
   haystacks = _entry_haystacks(entry)
   score = 0.0
 
   for value in haystacks["name"] + haystacks["aliases"]:
     if not value:
       continue
-    if value == query_lower:
+    value_tokens = set(_tokens(value))
+    if value == query_lower or (value_tokens and value_tokens == query_tokens):
       score += 10.0
-    elif query_lower in value or value in query_lower:
+    elif _contains_phrase(value, query_lower) or _contains_phrase(query_lower, value):
       score += 6.0
-    elif query_tokens & set(_tokens(value)):
-      score += 2.0
-
-  for value in haystacks["keywords"]:
-    if value and (value in query_lower or query_tokens & set(_tokens(value))):
+    elif query_tokens & value_tokens:
+      # Partial token overlap only counts in proportion to how much of the query
+      # it explains, so a one-word brush against a long name cannot outrank a
+      # full match.
+      score += 2.0 * (len(query_tokens & value_tokens) / len(query_tokens))
+    elif _fuzzy_overlap(query_tokens, value_tokens):
       score += 1.5
 
+  for value in haystacks["keywords"]:
+    if not value:
+      continue
+    value_tokens = set(_tokens(value))
+    if _contains_phrase(query_lower, value) or _contains_phrase(value, query_lower):
+      score += 2.5
+    elif query_tokens & value_tokens:
+      score += 1.5 * (len(query_tokens & value_tokens) / len(query_tokens))
+    elif _fuzzy_overlap(query_tokens, value_tokens):
+      score += 0.75
+
   for value in haystacks["components"]:
-    if value and (value in query_lower or query_lower in value):
+    if _contains_phrase(query_lower, value) or _contains_phrase(value, query_lower):
       score += 3.0
 
-  if query_lower in str(entry.get("category", "")).lower():
+  if query_lower and _contains_phrase(str(entry.get("category", "")).lower(), query_lower):
     score += 1.0
   return score
 
 
 def search_services(query: str, limit: int = 5, catalog: Iterable[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
   """Return catalogued products ranked by relevance to a free-text query."""
+  if limit <= 0:
+    return []
   entries = list(catalog) if catalog is not None else load_catalog()
   scored = [(entry, _score(entry, query)) for entry in entries]
   matches = [(entry, score) for entry, score in scored if score >= MIN_MATCH_SCORE]
@@ -201,10 +279,12 @@ def reverse_lookup(target_service: str, source_provider: str = "azure", catalog:
     if str(entry.get("provider", "")).lower() != source_provider.strip().lower():
       continue
     for provider, equivalent in (entry.get("equivalents") or {}).items():
-      for component in equivalent.get("components", []):
+      for component in ((equivalent or {}).get("components") or []):
+        if not isinstance(component, dict):
+          continue
         component_name = str(component.get("name", "")).lower()
         component_service = str(component.get("service", "")).lower()
-        if needle in component_name or (component_service and needle == component_service):
+        if _contains_phrase(component_name, needle) or (component_service and needle == component_service):
           results.append({
             "service": entry.get("name", ""),
             "provider": entry.get("provider", ""),
