@@ -72,7 +72,7 @@ class ServiceSearchTests(unittest.TestCase):
       with self.subTest(query=query):
         self.assertEqual("Azure Virtual Machines", search_services(query)[0]["name"])
 
-  def test_single_letter_and_empty_queries_match_nothing(self) -> None:
+  def test_low_signal_queries_match_nothing(self) -> None:
     for query in ["", "   ", "a", "the cloud service"]:
       with self.subTest(query=query):
         self.assertEqual([], search_services(query))

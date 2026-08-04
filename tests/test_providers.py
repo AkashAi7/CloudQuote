@@ -125,6 +125,11 @@ class ProviderTests(unittest.TestCase):
       with self.assertRaises(ValueError):
         _github_live_prices("https://github.com/pricing", session)
 
+  def test_live_fetch_rejects_missing_content_type_without_markup(self) -> None:
+    session = _Session(_Response("Team $4 USD per user/month", content_type=""))
+    with self.assertRaises(ValueError):
+      _github_live_prices("https://github.com/pricing", session)
+
   def test_live_fetch_strips_scripts_and_decodes_entities(self) -> None:
     page = (
       "<script>var team = 'Team $999 USD per user/month';</script>"

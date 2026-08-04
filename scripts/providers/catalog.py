@@ -54,9 +54,14 @@ def _fetch_live_page(url: str, session: requests.Session) -> str:
       )
       response.raise_for_status()
       content_type = str(getattr(response, "headers", {}).get("Content-Type", "") or "")
-      if content_type and "html" not in content_type.lower() and "text" not in content_type.lower():
-        raise ValueError(f"Unexpected content type for pricing page: {content_type}")
       text = response.text or ""
+      if content_type:
+        if "html" not in content_type.lower() and "text" not in content_type.lower():
+          raise ValueError(f"Unexpected content type for pricing page: {content_type}")
+      elif not re.search(r"(?i)<(!doctype|html|body|div|p|span)\b", text[:4096]):
+        # No Content-Type header, so fall back to sniffing for markup rather than
+        # regex-scanning an arbitrary binary or JSON body.
+        raise ValueError("Pricing page response did not declare or resemble HTML")
       if len(text) > LIVE_FETCH_MAX_BYTES:
         raise ValueError("Pricing page response exceeded the maximum supported size")
       if not text.strip():
