@@ -18,6 +18,7 @@ This module answers those questions from the curated catalog in
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import difflib
 import io
@@ -93,7 +94,7 @@ def _fuzzy_overlap(query_tokens: Set[str], value_tokens: Set[str]) -> bool:
 
 
 @lru_cache(maxsize=8)
-def load_catalog(path: str | None = None) -> List[Dict[str, Any]]:
+def _load_catalog_cached(path: str | None = None) -> List[Dict[str, Any]]:
   catalog_path = Path(path) if path else CATALOG_PATH
   if not catalog_path.exists():
     return []
@@ -107,6 +108,11 @@ def load_catalog(path: str | None = None) -> List[Dict[str, Any]]:
   if not isinstance(services, list):
     return []
   return [entry for entry in services if isinstance(entry, dict)]
+
+
+def load_catalog(path: str | None = None) -> List[Dict[str, Any]]:
+  """Return a private copy of the catalog so callers cannot corrupt the cache."""
+  return copy.deepcopy(_load_catalog_cached(path))
 
 
 def _entry_haystacks(entry: Dict[str, Any]) -> Dict[str, List[str]]:

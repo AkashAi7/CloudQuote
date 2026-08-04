@@ -62,7 +62,10 @@ def _fetch_live_page(url: str, session: requests.Session) -> str:
       if not text.strip():
         raise ValueError("Pricing page response was empty")
       return text
-    except Exception as error:  # retried below; the caller degrades to the catalog fallback
+    except ValueError:
+      # Deterministic rejection of the response itself; retrying cannot help.
+      raise
+    except Exception as error:  # transient; retried below, then the caller degrades to the fallback
       last_error = error
       if attempt + 1 < LIVE_FETCH_ATTEMPTS:
         time.sleep(LIVE_FETCH_BACKOFF_SECONDS * (2**attempt))

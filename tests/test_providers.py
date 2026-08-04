@@ -33,10 +33,10 @@ class _Session:
 
   def get(self, *_args, **_kwargs) -> _Response:
     self.calls += 1
-    if self._error is not None and self.calls > self._fail_times:
-      raise self._error
     if self.calls <= self._fail_times:
       raise RuntimeError("transient failure")
+    if self._error is not None:
+      raise self._error
     return self._response
 
 
