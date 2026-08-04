@@ -27,10 +27,27 @@ Provide:
 
 The generated output includes:
 
-- An Excel workbook with mapping, costs, assumptions, executive summary, and validation tabs
+- An Excel workbook with mapping, costs, assumptions, executive summary, service-equivalence, and validation tabs
 - `summary.json` for structured consumption
 - `executive_summary.md` for Copilot chat
 - `quote-plan.json` as the auditable agent-to-compiler contract
+
+## Service search and cross-provider equivalence
+
+Not every product has a one-to-one equivalent on another cloud. `mappings/service_equivalence.yaml` records direct equivalents and composite ones, where several products together cover a single product's capability (for example Microsoft Fabric maps to Amazon Redshift, AWS Glue, Amazon S3, Amazon Kinesis Data Analytics, and Amazon QuickSight).
+
+`scripts/service_search.py` searches that catalog by product name, alias, or capability keyword, and resolves equivalents in either direction, so an Azure-sourced BOQ or RFP can be converted to AWS products and an AWS BOQ can be converted to Azure:
+
+```powershell
+python scripts\service_search.py fabric --target-provider aws
+python scripts\service_search.py "data governance" --target-provider aws --format csv --output engagements\sample\fabric-equivalents.csv
+```
+
+Composite results are never presented as a like-for-like replacement: each component is listed with the capability it covers, and the line carries a `[VALIDATE]` note stating that every component must be priced separately. The generated workbook reports the same information on the `Service Equivalence` tab, and `summary.json` exposes it as `serviceEquivalence`. Use the CSV output when a special scenario needs the breakdown outside the workbook.
+
+The catalog is maintained in the repository rather than read from a provider pricing API, so equivalence resolution works even when an API cannot answer the question.
+
+Search matching is deliberately conservative so a wrong product is never quoted: queries are stemmed (so `virtual machine` and `Virtual Machines` rank identically), matched on word boundaries rather than raw substrings, tolerant of small typos (`fabrik` still resolves to Microsoft Fabric), and scored in proportion to how much of the query a candidate explains. Queries that carry no discriminating signal (empty, single-character, or stopwords only) return no matches rather than an arbitrary product, which surfaces as a `[VALIDATE]` note requiring agent research.
 
 ## Local setup
 
@@ -59,6 +76,8 @@ python scripts\run_pipeline.py `
 Each sidecar is prefixed by the workbook name, preventing collisions when multiple quotes share a directory. Unchanged inputs and options reuse existing artifacts only after fingerprint, hash, JSON, and workbook-format validation. Price reuse expires after 24 hours by default.
 
 Official provider catalogs and the Azure Retail Prices API are always used first. For unresolved reviewed-plan lines, the agent can supply approved MCP/search-API results through the typed `pricingEvidence` contract. The compiler never scrapes search-engine HTML. `--enable-web-search` remains as a compatibility flag that requires this reviewed evidence after official-source misses.
+
+The one live fetch the compiler performs is a refresh of an official published catalog page (for example GitHub's pricing page) when the verified snapshot is older than `liveRefreshHours`. That fetch is restricted to HTTPS, retried with exponential backoff, rejected if the response is empty, oversized, or not HTML, and the parsed price is discarded when it deviates by more than 5x from the verified catalog price. Any of those conditions degrades to the verified catalog fallback instead of quoting an unreliable figure.
 
 Use `--price-cache <path>` to isolate pricing caches for separate environments or benchmark first-run behavior.
 

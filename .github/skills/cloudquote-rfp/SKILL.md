@@ -27,6 +27,7 @@ RFP text in `.md`, `.txt`, `.pdf`, `.docx`, `.xlsx`, or pasted chat content. For
 
    - `<output-base>.specs.yaml` — same schema as `samples/customer_specs.yaml`.
    - `<output-base>.boq.csv` — same header as `samples/aws_boq.csv`. Use it as the quantity ledger for the RFP scope. Leave `Unit Price`, `Monthly`, `Annual` empty when the RFP states no incumbent pricing; the compiler resolves target prices.
+   - When the RFP names products from a provider other than the target (for example an Azure-worded RFP quoted on AWS), resolve each product with `python scripts\service_search.py <product> --target-provider <target>`. Emit one BOQ line per returned component when the equivalence is `composite`, and carry the returned `[VALIDATE]` note into the requirements matrix.
    - Set `Service`/`Instance/SKU` from the RFP's own wording. If the RFP is provider-neutral, express the line by capacity (vCPU/GB/requests) and record the sizing basis as an assumption.
 
 3. **Write the requirements matrix** `<output-base>.rfp-requirements.md` with one row per extracted requirement:

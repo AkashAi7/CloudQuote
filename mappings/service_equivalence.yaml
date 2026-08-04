@@ -1,0 +1,291 @@
+# Provider-neutral service equivalence catalog.
+#
+# Each entry describes one product in one provider and how it is satisfied on the
+# other providers. `equivalents` holds either a direct one-to-one product or a
+# composite set of products that together cover the capability. Composite entries
+# must be priced component by component; no single meter represents them.
+#
+# `aliases` and `keywords` power the search resolver in scripts/service_search.py
+# so a request such as "fabric" or "data lakehouse" resolves without depending on
+# a provider pricing API.
+
+services:
+  - id: azure-microsoft-fabric
+    provider: azure
+    name: Microsoft Fabric
+    category: analytics
+    aliases: [fabric, microsoft fabric, azure fabric, fabric capacity]
+    keywords: [lakehouse, unified analytics, onelake, data warehouse, bi, etl, data engineering, real-time analytics]
+    equivalents:
+      aws:
+        type: composite
+        rationale: >-
+          AWS has no single product covering Fabric's unified lakehouse, data
+          engineering, warehousing, real-time analytics, and BI experience.
+          Combine the following products to reach comparable capability.
+        components:
+          - name: Amazon Redshift
+            service: Redshift
+            covers: data warehouse and SQL analytics
+          - name: AWS Glue
+            service: Glue
+            covers: data engineering, ETL, and catalog
+          - name: Amazon S3
+            service: S3
+            covers: lakehouse storage (OneLake equivalent)
+          - name: Amazon Kinesis Data Analytics
+            service: Kinesis
+            covers: real-time analytics
+          - name: Amazon QuickSight
+            service: QuickSight
+            covers: business intelligence and reporting
+        pricing_note: >-
+          Fabric is sold as a capacity unit (F SKU) while the AWS components are
+          metered independently, so the totals are only comparable after each
+          component is sized separately.
+      gcp:
+        type: composite
+        rationale: Google Cloud covers Fabric with a warehouse, ETL, storage, streaming, and BI stack.
+        components:
+          - name: BigQuery
+            covers: data warehouse and SQL analytics
+          - name: Dataplex and Dataflow
+            covers: data engineering, ETL, and governance
+          - name: Cloud Storage
+            covers: lakehouse storage
+          - name: Looker
+            covers: business intelligence and reporting
+
+  - id: azure-synapse-analytics
+    provider: azure
+    name: Azure Synapse Analytics
+    category: analytics
+    aliases: [synapse, azure synapse, synapse analytics, dedicated sql pool]
+    keywords: [data warehouse, dwu, mpp, analytics]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: Amazon Redshift
+            service: Redshift
+            covers: dedicated data warehouse compute and storage
+
+  - id: azure-virtual-machines
+    provider: azure
+    name: Azure Virtual Machines
+    category: compute
+    aliases: [virtual machines, azure vm, vm, iaas compute]
+    keywords: [compute, vcpu, instance, server]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: Amazon EC2
+            service: EC2
+            covers: general-purpose instance compute
+
+  - id: azure-blob-storage
+    provider: azure
+    name: Azure Blob Storage
+    category: storage
+    aliases: [blob storage, azure blob, storage account, adls, data lake storage]
+    keywords: [object storage, hot, cool, archive]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: Amazon S3
+            service: S3
+            covers: object storage with equivalent access tiers
+
+  - id: azure-managed-disks
+    provider: azure
+    name: Azure Managed Disks
+    category: storage
+    aliases: [managed disks, premium ssd, ultra disk, azure disk]
+    keywords: [block storage, iops, throughput]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: Amazon EBS
+            service: EBS
+            covers: provisioned block storage
+
+  - id: azure-sql-database
+    provider: azure
+    name: Azure SQL Database
+    category: database
+    aliases: [azure sql, sql database, sql mi, managed instance]
+    keywords: [relational, managed database, vcore, dtu]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: Amazon RDS
+            service: RDS
+            covers: managed relational database with HA and backup
+
+  - id: azure-cosmos-db
+    provider: azure
+    name: Azure Cosmos DB
+    category: database
+    aliases: [cosmos, cosmos db, cosmosdb]
+    keywords: [nosql, request unit, ru, globally distributed]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: Amazon DynamoDB
+            service: DynamoDB
+            covers: managed NoSQL with provisioned or autoscale throughput
+        pricing_note: Request units and DynamoDB capacity units are not interchangeable without a documented conversion.
+
+  - id: azure-functions
+    provider: azure
+    name: Azure Functions
+    category: compute
+    aliases: [functions, azure function, serverless functions]
+    keywords: [serverless, event driven, execution]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: AWS Lambda
+            service: Lambda
+            covers: event-driven serverless execution
+
+  - id: azure-kubernetes-service
+    provider: azure
+    name: Azure Kubernetes Service
+    category: containers
+    aliases: [aks, azure kubernetes, kubernetes service]
+    keywords: [kubernetes, containers, cluster]
+    equivalents:
+      aws:
+        type: composite
+        rationale: EKS charges cluster management separately from the worker-node compute that AKS lines usually include.
+        components:
+          - name: Amazon EKS
+            service: EKS
+            covers: managed control plane
+          - name: Amazon EC2 or Fargate
+            service: EC2
+            covers: worker-node compute
+
+  - id: azure-front-door
+    provider: azure
+    name: Azure Front Door
+    category: networking
+    aliases: [front door, azure front door, afd]
+    keywords: [cdn, waf, global load balancing, edge]
+    equivalents:
+      aws:
+        type: composite
+        rationale: Front Door bundles CDN, global routing, and WAF that AWS bills as separate products.
+        components:
+          - name: Amazon CloudFront
+            service: CloudFront
+            covers: content delivery and edge caching
+          - name: AWS Global Accelerator
+            covers: global anycast routing
+          - name: AWS WAF
+            covers: web application firewall
+
+  - id: azure-application-gateway
+    provider: azure
+    name: Azure Application Gateway
+    category: networking
+    aliases: [application gateway, appgw, waf v2]
+    keywords: [layer 7, load balancer, waf]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: Application Load Balancer
+            service: ALB
+            covers: layer-7 load balancing
+
+  - id: azure-load-balancer
+    provider: azure
+    name: Azure Load Balancer
+    category: networking
+    aliases: [load balancer, azure load balancer, slb]
+    keywords: [layer 4, network load balancing]
+    equivalents:
+      aws:
+        type: direct
+        components:
+          - name: Network Load Balancer
+            service: ELB
+            covers: layer-4 load balancing
+
+  - id: azure-virtual-network
+    provider: azure
+    name: Azure Virtual Network
+    category: networking
+    aliases: [vnet, virtual network, azure vnet]
+    keywords: [network, peering, nat gateway, private endpoint]
+    equivalents:
+      aws:
+        type: composite
+        rationale: Network charges are componentized on both providers and never resolve from a single meter.
+        components:
+          - name: Amazon VPC
+            service: VPC
+            covers: virtual network
+          - name: NAT Gateway
+            covers: outbound address translation
+          - name: VPC Endpoints and Peering
+            covers: private connectivity and inter-VNet traffic
+
+  - id: azure-purview
+    provider: azure
+    name: Microsoft Purview
+    category: governance
+    aliases: [purview, microsoft purview, azure purview]
+    keywords: [data governance, catalog, lineage, classification]
+    equivalents:
+      aws:
+        type: composite
+        rationale: AWS splits catalog, governance, and classification across several products.
+        components:
+          - name: AWS Glue Data Catalog
+            covers: technical metadata catalog
+          - name: Amazon DataZone
+            covers: business catalog and governance
+          - name: Amazon Macie
+            covers: sensitive-data classification
+
+  - id: azure-databricks
+    provider: azure
+    name: Azure Databricks
+    category: analytics
+    aliases: [databricks, azure databricks]
+    keywords: [spark, data engineering, ml, dbu]
+    equivalents:
+      aws:
+        type: composite
+        rationale: A managed Spark platform on AWS is billed as EMR compute plus the underlying instances.
+        components:
+          - name: Amazon EMR
+            covers: managed Spark runtime
+          - name: Amazon EC2
+            service: EC2
+            covers: cluster instance compute
+
+  - id: azure-monitor
+    provider: azure
+    name: Azure Monitor
+    category: management
+    aliases: [azure monitor, log analytics, application insights]
+    keywords: [monitoring, logs, metrics, observability]
+    equivalents:
+      aws:
+        type: composite
+        rationale: Azure Monitor combines metrics, logs, and APM that AWS bills separately.
+        components:
+          - name: Amazon CloudWatch
+            covers: metrics, logs, and alarms
+          - name: AWS X-Ray
+            covers: distributed tracing and APM

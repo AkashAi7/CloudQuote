@@ -9,6 +9,7 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from pricing import fetch_prices, resolve_best_price, select_best_price
 from providers import resolve_catalog_price
+from service_search import describe_line_equivalence
 import yaml
 
 
@@ -1142,6 +1143,67 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   ws4.append(["Recommended scenario", recommended_scenario or "N/A (validation blockers)"])
   ws4.append(["Decision confidence", "High" if validate_count == 0 else ("Medium" if validate_count <= 5 else "Low")])
 
+  ws6 = wb.create_sheet("Service Equivalence")
+  ws6.append([
+    "Source line",
+    "Source provider",
+    "Target provider",
+    "Equivalence",
+    "Target component",
+    "Capability covered",
+    "Rationale",
+    "Notes/[VALIDATE]",
+  ])
+  equivalence_items: List[Dict[str, Any]] = []
+  equivalence_validation_rows: List[Dict[str, Any]] = []
+  seen_equivalence: set[str] = set()
+  for row in aws_rows:
+    source_provider = str(row.get("Source Provider", "aws")) or "aws"
+    target_provider = str(row.get("Target Provider", "azure")) or "azure"
+    resolution = None
+    for term in [
+      str(row.get("Azure Service", "")).strip(),
+      _normalize_aws_service(str(row.get("Service", ""))).strip(),
+      str(row.get("Source Description", "")).strip(),
+    ]:
+      if not term:
+        continue
+      candidate = describe_line_equivalence(term, source_provider, target_provider)
+      if candidate.get("matched"):
+        resolution = candidate
+        break
+    if not resolution:
+      continue
+    key = f"{str(resolution.get('query', '')).lower()}|{source_provider}|{target_provider}"
+    if key in seen_equivalence:
+      continue
+    seen_equivalence.add(key)
+    equivalence_items.append(resolution)
+    components = resolution.get("components") or [{}]
+    component_names = ", ".join(str(component.get("name", "")) for component in components)
+    for component in components:
+      ws6.append([
+        resolution.get("query", ""),
+        resolution.get("sourceProvider", source_provider),
+        resolution.get("targetProvider", target_provider),
+        resolution.get("type", ""),
+        component.get("name", ""),
+        component.get("covers", ""),
+        resolution.get("rationale", ""),
+        "; ".join(resolution.get("validations", [])),
+      ])
+    for validation in resolution.get("validations", []):
+      equivalence_validation_rows.append({
+        "line": resolution.get("query", ""),
+        "scenario": scenario,
+        "reason": validation,
+        "service": resolution.get("service", ""),
+        "source_sku": "",
+        "mapped_sku": component_names,
+      })
+  if ws6.max_row == 1:
+    ws6.append(["", "", "", "", "", "", "", "No catalogued cross-provider equivalence applied."])
+
   # Validation sheet for auditability.
   ws5 = wb.create_sheet("Validation & Coverage")
   ws5.append(["Type", "Line", "Scenario", "Reason", "Service", "Source SKU", "Mapped SKU"])
@@ -1159,7 +1221,17 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   if missing_fields:
     for field in missing_fields:
       ws5.append(["INPUT_GAP", "", "", f"Missing or ambiguous spec field: {field}", "", "", ""])
-  if not validation_rows and not missing_fields:
+  for item in equivalence_validation_rows:
+    ws5.append([
+      "SERVICE_EQUIVALENCE",
+      item["line"],
+      item["scenario"],
+      item["reason"],
+      item["service"],
+      item["source_sku"],
+      item["mapped_sku"],
+    ])
+  if not validation_rows and not equivalence_validation_rows and not missing_fields:
     ws5.append(["INFO", "", "", "No validation blockers detected.", "", "", ""])
 
   driver_scenario = recommended_scenario if recommended_scenario else (scenario if scenario in SCENARIOS else "conservative")
@@ -1234,6 +1306,18 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     "validationItemCount": len(validation_rows),
     "validationItems": validation_rows[:20],
     "validationItemsTruncated": len(validation_rows) > 20,
+    "serviceEquivalence": [
+      {
+        "sourceLine": str(item.get("query", "")),
+        "sourceProvider": str(item.get("sourceProvider", "")),
+        "targetProvider": str(item.get("targetProvider", "")),
+        "type": str(item.get("type", "")),
+        "components": [str(component.get("name", "")) for component in item.get("components", [])],
+        "validations": list(item.get("validations", [])),
+      }
+      for item in equivalence_items
+    ],
+    "compositeEquivalenceCount": sum(1 for item in equivalence_items if item.get("type") in {"composite", "partial"}),
     "missingSpecFields": missing_fields,
     **pricing_telemetry,
   }

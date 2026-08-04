@@ -1,3 +1,4 @@
+import copy
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -7,21 +8,36 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from providers.catalog import resolve_catalog_price
+from providers.catalog import _github_live_prices, _load_catalogs, resolve_catalog_price
 from providers.evidence import resolve_reviewed_evidence
 from providers.targets import require_target_provider
 
 
 class _Response:
-  text = "Free $0 USD per user/month Team $4 USD per user/month Enterprise $21 USD per user/month"
+  def __init__(self, text: str | None = None, content_type: str = "text/html") -> None:
+    self.text = text if text is not None else (
+      "Free $0 USD per user/month Team $4 USD per user/month Enterprise $21 USD per user/month"
+    )
+    self.headers = {"Content-Type": content_type}
 
   def raise_for_status(self) -> None:
     return None
 
 
 class _Session:
+  def __init__(self, response: _Response | None = None, error: Exception | None = None, fail_times: int = 0) -> None:
+    self._response = response or _Response()
+    self._error = error
+    self._fail_times = fail_times
+    self.calls = 0
+
   def get(self, *_args, **_kwargs) -> _Response:
-    return _Response()
+    self.calls += 1
+    if self.calls <= self._fail_times:
+      raise RuntimeError("transient failure")
+    if self._error is not None:
+      raise self._error
+    return self._response
 
 
 class ProviderTests(unittest.TestCase):
@@ -80,11 +96,61 @@ class ProviderTests(unittest.TestCase):
     self.assertEqual(["https://github.com/pricing"], result["source_links"])
 
   def test_fresh_verified_catalog_skips_http_refresh(self) -> None:
-    with patch("providers.catalog._github_live_prices") as live_prices:
+    catalogs = copy.deepcopy(_load_catalogs())
+    catalogs["catalogs"]["github"]["verifiedAt"] = datetime.now(timezone.utc).isoformat()
+    with (
+      patch("providers.catalog._load_catalogs", return_value=catalogs),
+      patch("providers.catalog._github_live_prices") as live_prices,
+    ):
       result = resolve_catalog_price("github", "GitHub Team", 25, "USD", session=_Session())
 
     self.assertEqual(100, result["monthly"])
     live_prices.assert_not_called()
+
+  def test_live_fetch_retries_transient_failures(self) -> None:
+    session = _Session(fail_times=2)
+    with patch("providers.catalog.time.sleep"):
+      prices = _github_live_prices("https://github.com/pricing", session)
+
+    self.assertEqual(3, session.calls)
+    self.assertEqual(4, prices["team"])
+
+  def test_live_fetch_rejects_non_https_url(self) -> None:
+    with self.assertRaises(ValueError):
+      _github_live_prices("http://github.com/pricing", _Session())
+
+  def test_live_fetch_rejects_non_html_content_type(self) -> None:
+    session = _Session(_Response(content_type="application/octet-stream"))
+    with patch("providers.catalog.time.sleep"):
+      with self.assertRaises(ValueError):
+        _github_live_prices("https://github.com/pricing", session)
+
+  def test_live_fetch_rejects_missing_content_type_without_markup(self) -> None:
+    session = _Session(_Response("Team $4 USD per user/month", content_type=""))
+    with self.assertRaises(ValueError):
+      _github_live_prices("https://github.com/pricing", session)
+
+  def test_live_fetch_strips_scripts_and_decodes_entities(self) -> None:
+    page = (
+      "<script>var team = 'Team $999 USD per user/month';</script>"
+      "<p>Team &#36;4 USD per user&nbsp;/ month</p>"
+    )
+    prices = _github_live_prices("https://github.com/pricing", _Session(_Response(page)))
+
+    self.assertEqual(4, prices["team"])
+
+  def test_implausible_live_price_falls_back_to_verified_catalog(self) -> None:
+    with patch("providers.catalog._github_live_prices", return_value={"team": 4000.0}):
+      result = resolve_catalog_price("github", "GitHub Team", 25, "USD", session=_Session())
+
+    self.assertEqual(100, result["monthly"])
+    self.assertIn("OFFICIAL_CATALOG_FALLBACK", result["source_note"])
+
+  def test_plausible_live_price_is_used(self) -> None:
+    with patch("providers.catalog._github_live_prices", return_value={"team": 5.0}):
+      result = resolve_catalog_price("github", "GitHub Team", 25, "USD", session=_Session())
+
+    self.assertEqual(125, result["monthly"])
 
   def test_catalog_currency_mismatch_is_flagged(self) -> None:
     result = resolve_catalog_price("github", "Team", 25, "INR", session=_Session())

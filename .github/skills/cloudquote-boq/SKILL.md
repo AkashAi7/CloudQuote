@@ -66,8 +66,9 @@ python scripts\quote_plan.py --normalized <output-base>.normalized.json --output
 3. Inspect the normalized inputs and plan. Identify workloads, capacities, environments, licenses, SLA, RTO/RPO, growth, and ambiguous fields.
 4. Apply provider mapping with agent reasoning. Update every plan line's `target`, `assumptions`, and `validations`. Never invent missing workload dimensions.
 5. Apply the pricing guardrail skill before accepting any quantity-to-meter conversion. Put unresolved conflicts in each line's `validations` array.
-6. When official APIs and catalogs miss, use an MCP-backed search provider or reliable search API. Add only reviewed results to the line's `pricingEvidence` array with exact provider, service, SKU, region, currency, price type, meter, unit, unit price, retrieval time, and HTTPS evidence URL. Set `source` to `mcp-web` or `search-api` and `status` to `approved`. Never scrape Bing, DuckDuckGo, or other search-result HTML.
-7. Run the artifact compiler with the exact reviewed plan and normalized input:
+6. Resolve cross-provider product equivalence with `python scripts\service_search.py <service or capability> --target-provider <target>` before mapping any line whose target product is unclear. When the result is `composite`, map one plan line per component, put the returned `[VALIDATE]` note in the line's `validations`, and never present the partial set as a like-for-like replacement. Add `--format csv --output <path>` when the breakdown must be delivered outside the workbook.
+7. When official APIs and catalogs miss, use an MCP-backed search provider or reliable search API. Add only reviewed results to the line's `pricingEvidence` array with exact provider, service, SKU, region, currency, price type, meter, unit, unit price, retrieval time, and HTTPS evidence URL. Set `source` to `mcp-web` or `search-api` and `status` to `approved`. Never scrape Bing, DuckDuckGo, or other search-result HTML.
+8. Run the artifact compiler with the exact reviewed plan and normalized input:
 
 ```powershell
 python scripts\run_pipeline.py --specs <specs> --aws-boq <boq> --normalized-input <output-base>.normalized.json --plan <output-base>.plan-input.json --output <output.xlsx> --region <region> --currency <currency> --scenario <scenario> --max-price-age-hours 24 --enable-web-search
@@ -75,8 +76,8 @@ python scripts\run_pipeline.py --specs <specs> --aws-boq <boq> --normalized-inpu
 
 On Windows, if `python` is unavailable, locate Python with `Get-Command python, py` and use the resolved interpreter.
 
-8. Trust returned paths; the compiler verifies hashes and artifact formats before completion.
-9. Finish using the artifact-delivery skill.
+9. Trust returned paths; the compiler verifies hashes and artifact formats before completion.
+10. Finish using the artifact-delivery skill.
 
 ## Performance rules
 
@@ -93,6 +94,7 @@ On Windows, if `python` is unavailable, locate Python with `Get-Command python, 
 
 - Scripts normalize, validate, price, and compile; they do not make unrecorded mapping decisions.
 - Never silently calculate across incompatible source usage and target meter dimensions.
+- Resolve product equivalence from the curated `mappings/service_equivalence.yaml` catalog rather than assuming a pricing API can answer it.
 - Use official provider catalog adapters before reviewed search evidence. GitHub plans resolve from `https://github.com/pricing`.
 - Do not claim AWS or GCP compilation support; their adapters currently validate plans only.
 - Never modify customer input files.

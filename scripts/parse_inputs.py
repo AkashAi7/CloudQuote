@@ -91,21 +91,25 @@ def _infer_service(description: str, sku: str, explicit_service: str) -> str:
   haystack = f"{description} {sku}".lower()
   service_map = {
     "rds": ["rds", "db.", "postgresql", "mysql", "sql"],
-    "ec2": ["ec2", "t3.", "m5.", "m6", "m7", "r6", "r7", "c6", "g4", "c5", "r5"],
-    "ebs": ["ebs", "gp3", "iops", "ssd"],
-    "s3": ["s3", "object storage"],
+    "ec2": ["ec2", "t3.", "m5.", "m6", "m7", "r6", "r7", "c6", "g4", "c5", "r5", "virtual machine", "azure vm"],
+    "ebs": ["ebs", "gp3", "iops", "ssd", "managed disk"],
+    "s3": ["s3", "object storage", "blob storage", "data lake storage"],
     "efs": ["efs", "file storage"],
-    "lambda": ["lambda"],
-    "dynamodb": ["dynamodb"],
+    "lambda": ["lambda", "azure functions"],
+    "dynamodb": ["dynamodb", "cosmos db"],
     "eks": ["eks", "kubernetes"],
     "elb": ["load balancer", "nlb", "network load balancer", "elb"],
     "alb": ["application gateway", "application load balancer", "alb"],
-    "cloudfront": ["cloudfront", "cdn"],
-    "redshift": ["redshift", "data warehouse"],
-    "vpc": ["vpc", "vnet", "peering", "nat gateway", "private endpoint"],
+    "cloudfront": ["cloudfront", "cdn", "front door"],
+    "redshift": ["redshift", "data warehouse", "synapse"],
+    "vpc": ["vpc", "vnet", "peering", "nat gateway", "private endpoint", "virtual network"],
     "github": ["github team", "github enterprise", "github free", "github"],
   }
 
+  # Target-provider wording is recognised so an Azure-worded BOQ or RFP still routes to a
+  # pricing profile. Composite products (Front Door, Virtual Network, AKS) resolve to their
+  # primary component here; the equivalence resolver reports the remaining components and
+  # their [VALIDATE] note, and the composite pricing profiles block a total either way.
   for service, tokens in service_map.items():
     if any(token in haystack for token in tokens):
       return service
