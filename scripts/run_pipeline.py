@@ -37,7 +37,7 @@ def _run_fingerprint(
     aws_boq_path,
     *([quote_plan_path] if quote_plan_path else []),
     *([normalized_input_path] if normalized_input_path else []),
-    *sorted((project_root / "scripts").glob("*.py")),
+    *sorted((project_root / "scripts").rglob("*.py")),
     *sorted((project_root / "mappings").glob("*.yaml")),
     *sorted((project_root / "schemas").glob("*.json")),
   ]
@@ -96,9 +96,23 @@ def _run_lock(path: Path, stale_after_seconds: int = 3600) -> Iterator[None]:
 
 def _render_executive_summary(summary: dict) -> str:
   lines: list[str] = []
-  lines.append("# AWS to Azure BOQ Executive Summary")
+  lines.append("# CloudQuote Executive Summary")
   lines.append("")
   lines.append("## Decision Snapshot")
+  status = summary.get("opportunityStatus", {})
+  lines.append(f"- Readiness: {status.get('readiness', 'Not reviewed / internal estimate')}")
+  lines.append(f"- Mandatory eligibility: {status.get('eligibility', 'Not reviewed')}")
+  lines.append(f"- Release-ready: {status.get('releaseReady', False)}")
+  lines.append(f"- Baseline current: {status.get('baselineCurrent', False)}")
+  lines.append(f"- Requirement coverage: {json.dumps(status.get('coverage', {}))}")
+  lines.append(f"- Gate approvals: {json.dumps(status.get('approvals', {}))}")
+  lines.append(f"- Assumption approvals: {json.dumps(status.get('assumptionApprovals', {}))}")
+  for limitation in status.get("comparisonLimitations", []):
+    lines.append(f"- Comparison limitation: {limitation}")
+  for reason in status.get("blockingReasons", []):
+    lines.append(f"- Blocker: {reason}")
+  lines.append(f"- Next action: {status.get('nextAction', 'Complete opportunity review')}")
+  lines.append(f"- Owner: {status.get('owner') or 'Unassigned'}")
   lines.append(f"- Recommended scenario: {summary.get('recommendedScenario', 'N/A')}")
   lines.append(f"- Decision confidence: {summary.get('decisionConfidence', 'N/A')}")
   lines.append(f"- Validation blockers: {summary.get('validateCount', 0)}")
@@ -107,15 +121,22 @@ def _render_executive_summary(summary: dict) -> str:
   totals = summary.get("scenarioTotalsMonthly", {})
   savings = summary.get("scenarioSavings", {})
   lines.append("## Monthly Cost View")
-  lines.append(f"- AWS baseline: {totals.get('aws', 'N/A')} {summary.get('currency', 'USD')}")
+  if status.get("mode") == "quick-triage":
+    lines.append("- Not priced: triage does not invoke a target compiler.")
+  elif not status.get("qualifiedComparison", False):
+    lines.append("- Internal/provisional comparison only; savings and recommendation are not qualified.")
+  source_label = summary.get("sourceProvider", "aws").upper()
+  lines.append(f"- {source_label} baseline: {totals.get('aws', 'N/A')} {summary.get('currency', 'USD')}")
   for scenario_name in ["conservative", "moderate", "aggressive"]:
     if scenario_name in totals:
       lines.append(f"- Azure {scenario_name}: {totals[scenario_name]} {summary.get('currency', 'USD')}")
       sv = savings.get(scenario_name)
       if isinstance(sv, dict):
-        lines.append(f"  Savings vs AWS: {sv.get('amount', 'N/A')} ({sv.get('percent', 'N/A')}%)")
+        percent = sv.get("percent")
+        percent_text = f"{percent}%" if percent is not None else "N/A (zero incumbent baseline)"
+        lines.append(f"  Savings vs {source_label}: {sv.get('amount', 'N/A')} ({percent_text})")
       elif sv:
-        lines.append(f"  Savings vs AWS: {sv}")
+        lines.append(f"  Savings vs {source_label}: {sv}")
   lines.append("")
 
   source_counts = summary.get("sourceCounts", {})
@@ -131,7 +152,7 @@ def _render_executive_summary(summary: dict) -> str:
   if positives:
     for item in positives[:3]:
       lines.append(
-        f"- {item.get('line', '')}: AWS {item.get('aws', 0)} -> Azure {item.get('azure', 0)} (delta {item.get('delta', 0)})"
+        f"- {item.get('line', '')}: {source_label} {item.get('aws', 0)} -> Azure {item.get('azure', 0)} (delta {item.get('delta', 0)})"
       )
   else:
     lines.append("- None")
@@ -142,7 +163,7 @@ def _render_executive_summary(summary: dict) -> str:
   if negatives:
     for item in negatives[:3]:
       lines.append(
-        f"- {item.get('line', '')}: AWS {item.get('aws', 0)} -> Azure {item.get('azure', 0)} (delta {item.get('delta', 0)})"
+        f"- {item.get('line', '')}: {source_label} {item.get('aws', 0)} -> Azure {item.get('azure', 0)} (delta {item.get('delta', 0)})"
       )
   else:
     lines.append("- None")
@@ -212,7 +233,8 @@ def main() -> None:
     except (OSError, json.JSONDecodeError):
       manifest = {}
     if manifest.get("fingerprint") == fingerprint and _artifacts_are_valid(manifest, artifacts):
-      print(json.dumps({**artifacts, "reused": True}, indent=2))
+      cached_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+      print(json.dumps({**artifacts, "reused": True, "opportunityStatus": cached_summary["opportunityStatus"]}, indent=2))
       return
 
   lock_path = artifact_base.with_suffix(".cloudquote.lock")
@@ -232,15 +254,19 @@ def main() -> None:
       from parse_inputs import normalize_inputs
 
       normalized = normalize_inputs(Path(args.specs), Path(args.aws_boq), normalized_path)
+    # Verify the actual CLI source files, not just the provenance paths in a supplied snapshot.
+    normalized["specs_source"] = str(Path(args.specs).resolve())
+    normalized["aws_boq_source"] = str(Path(args.aws_boq).resolve())
     if supplied_plan_path:
       quote_plan = load_quote_plan(supplied_plan_path)
     else:
       quote_plan = build_quote_plan(normalized)
-    target_adapter = require_target_provider(str(quote_plan["targetProvider"]))
-    target_adapter.validate_plan(quote_plan)
-    target_adapter.require_capability("compile")
+    if quote_plan.get("opportunityReview", {}).get("mode") != "quick-triage":
+      target_adapter = require_target_provider(str(quote_plan["targetProvider"]))
+      target_adapter.validate_plan(quote_plan)
+      target_adapter.require_capability("compile")
     save_quote_plan(quote_plan, quote_plan_path)
-    normalized = apply_quote_plan(normalized, quote_plan)
+    normalized = apply_quote_plan(normalized, quote_plan, {"region": args.region, "currency": args.currency, "scenario": args.scenario})
     _write_json_atomic(normalized_path, normalized)
 
     pricing_date = datetime.now(timezone.utc).date().isoformat()
@@ -269,7 +295,7 @@ def main() -> None:
       "artifactHashes": {name: _file_sha256(Path(path)) for name, path in artifacts.items()},
     }
     _write_json_atomic(manifest_path, manifest)
-  print(json.dumps({**artifacts, "reused": False}, indent=2))
+  print(json.dumps({**artifacts, "reused": False, "opportunityStatus": summary["opportunityStatus"]}, indent=2))
 
 
 if __name__ == "__main__":

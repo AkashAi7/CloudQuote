@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CloudQuote opportunity review (approval metadata is audit input, not verified identity)",
+  "type": "object",
+  "required": ["version", "mode", "baseline", "baselineComplete", "documents", "requirements", "assumptions", "gates"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": "1.0"},
+    "mode": {"enum": ["quick-triage", "working-estimate", "submission-ready"]},
+    "baseline": {"$ref": "#/$defs/baseline"},
+    "baselineComplete": {"type": "boolean"},
+    "documents": {"type": "array", "items": {"$ref": "#/$defs/document"}},
+    "requirements": {"type": "array", "items": {"$ref": "#/$defs/requirement"}},
+    "assumptions": {"type": "array", "items": {"$ref": "#/$defs/assumption"}},
+    "gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}}
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/text"}},
+    "context": {
+      "type": "object", "additionalProperties": false,
+      "required": ["region", "currency", "scenario"],
+      "properties": {
+        "region": {"$ref": "#/$defs/text"}, "currency": {"$ref": "#/$defs/text"},
+        "scenario": {"enum": ["compare-all", "conservative", "moderate", "aggressive"]}
+      }
+    },
+    "baseline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["planDigest", "inputsDigest", "context"],
+      "properties": {
+        "planDigest": {"$ref": "#/$defs/digest"},
+        "inputsDigest": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "context": {"$ref": "#/$defs/context"}
+      }
+    },
+    "document": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "sourceReference", "contentId"],
+      "properties": {
+        "id": {"$ref": "#/$defs/text"}, "version": {"$ref": "#/$defs/text"},
+        "sourceReference": {"$ref": "#/$defs/text"}, "contentId": {"$ref": "#/$defs/text"},
+        "supersedes": {"$ref": "#/$defs/text"}, "amends": {"$ref": "#/$defs/text"}
+      }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false, "required": ["documentId", "location"],
+      "properties": {"documentId": {"$ref": "#/$defs/text"}, "location": {"$ref": "#/$defs/text"}}
+    },
+    "requirement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "priority", "acceptanceCriterion", "source", "qualification", "evidence", "lineIds"],
+      "properties": {
+        "id": {"$ref": "#/$defs/text"},
+        "priority": {"enum": ["mandatory", "scored", "optional", "informational"]},
+        "acceptanceCriterion": {"$ref": "#/$defs/text"}, "source": {"$ref": "#/$defs/source"},
+        "qualification": {"enum": ["pass", "fail", "unresolved"]},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+        "lineIds": {"$ref": "#/$defs/ids"}, "nonPricedJustification": {"$ref": "#/$defs/text"},
+        "supersedes": {"$ref": "#/$defs/text"},
+        "owner": {"$ref": "#/$defs/text"}, "nextAction": {"$ref": "#/$defs/text"},
+        "weight": {"type": "number", "exclusiveMinimum": 0},
+        "score": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "approval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "confirmedAt", "evidence", "reviewDigest"],
+      "properties": {
+        "name": {"$ref": "#/$defs/text"},
+        "confirmedAt": {"type": "string", "format": "date-time"},
+        "evidence": {"$ref": "#/$defs/text"}, "reviewDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "assumption": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "text", "material", "lineIds", "status"],
+      "properties": {
+        "id": {"$ref": "#/$defs/text"}, "version": {"$ref": "#/$defs/text"},
+        "text": {"$ref": "#/$defs/text"}, "material": {"type": "boolean"},
+        "lineIds": {"$ref": "#/$defs/ids"}, "status": {"enum": ["proposed", "approved", "rejected"]},
+        "approval": {"$ref": "#/$defs/approval"},
+        "owner": {"$ref": "#/$defs/text"}, "nextAction": {"$ref": "#/$defs/text"}
+      }
+    },
+    "gate": {
+      "type": "object", "additionalProperties": false, "required": ["id", "status"],
+      "properties": {
+        "id": {"enum": ["requirements", "architecture", "qualification", "boq", "pricing-reconciliation", "compliance", "commercial", "customer-release"]},
+        "status": {"enum": ["pending", "approved", "rejected"]},
+        "approval": {"$ref": "#/$defs/approval"},
+        "owner": {"$ref": "#/$defs/text"}, "nextAction": {"$ref": "#/$defs/text"}
+      }
+    }
+  }
+}
