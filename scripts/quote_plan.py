@@ -2,6 +2,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -37,6 +38,7 @@ def build_quote_plan(
 ) -> Dict[str, Any]:
   lines: List[Dict[str, Any]] = []
   for index, row in enumerate(normalized.get("aws_boq", [])):
+    monthly_cost = source_monthly_cost(row)
     lines.append({
       "id": _line_id(index, row),
       "source": {
@@ -46,7 +48,7 @@ def build_quote_plan(
         "quantity": row.get("Quantity", 1),
         "unit": str(row.get("Source Unit", "")),
         "capacity": str(row.get("Capacity", "")),
-        "monthlyCost": row.get("Monthly", 0),
+        **({"monthlyCost": monthly_cost} if monthly_cost is not None else {}),
       },
       "target": {
         "provider": target_provider,
@@ -66,6 +68,8 @@ def build_quote_plan(
 
 
 def validate_quote_plan(plan: Dict[str, Any]) -> None:
+  if not isinstance(plan, dict):
+    raise QuotePlanError("Quote plan must be an object")
   if plan.get("schemaVersion") != SCHEMA_VERSION:
     raise QuotePlanError(f"Unsupported quote plan schemaVersion: {plan.get('schemaVersion')!r}")
   for field in ["sourceProvider", "targetProvider"]:
@@ -73,19 +77,25 @@ def validate_quote_plan(plan: Dict[str, Any]) -> None:
     if provider not in SUPPORTED_PROVIDERS:
       raise QuotePlanError(f"Unsupported {field}: {provider!r}")
   lines = plan.get("lines")
-  if not isinstance(lines, list) or not lines:
+  triage = isinstance(plan.get("opportunityReview"), dict) and plan["opportunityReview"].get("mode") == "quick-triage"
+  if not isinstance(lines, list) or (not lines and not triage):
     raise QuotePlanError("Quote plan must contain at least one line")
   seen_ids = set()
   for index, line in enumerate(lines):
     if not isinstance(line, dict):
       raise QuotePlanError(f"Line {index + 1} must be an object")
-    line_id = str(line.get("id", ""))
-    if not line_id or line_id in seen_ids:
+    line_id = line.get("id")
+    if not isinstance(line_id, str) or not line_id.strip() or line_id in seen_ids:
       raise QuotePlanError(f"Line {index + 1} has a missing or duplicate id")
     seen_ids.add(line_id)
     for side in ["source", "target"]:
       if not isinstance(line.get(side), dict):
         raise QuotePlanError(f"Line {line_id} is missing {side}")
+      for field in ("quantity", "monthlyCost"):
+        if field in line[side]:
+          value = line[side][field]
+          if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise QuotePlanError(f"Line {line_id} {side}.{field} must be a finite number, not a boolean")
     validations = line.get("validations", [])
     assumptions = line.get("assumptions", [])
     if not isinstance(validations, list) or not all(isinstance(item, str) for item in validations):
@@ -110,7 +120,7 @@ def validate_quote_plan(plan: Dict[str, Any]) -> None:
           raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} {field} must be a non-empty string")
       if evidence["priceType"] not in {"Consumption", "Reservation"}:
         raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} has an invalid priceType")
-      if not isinstance(evidence["unitPrice"], (int, float)) or isinstance(evidence["unitPrice"], bool) or evidence["unitPrice"] < 0:
+      if not isinstance(evidence["unitPrice"], (int, float)) or isinstance(evidence["unitPrice"], bool) or not math.isfinite(evidence["unitPrice"]) or evidence["unitPrice"] < 0:
         raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} unitPrice must be non-negative")
       if not str(evidence["evidenceUrl"]).startswith("https://"):
         raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} evidenceUrl must use HTTPS")
@@ -120,35 +130,74 @@ def validate_quote_plan(plan: Dict[str, Any]) -> None:
         raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} retrievedAt must be ISO-8601") from exc
       if retrieved_at.tzinfo is None:
         raise QuotePlanError(f"Line {line_id} pricing evidence {evidence_index} retrievedAt must include a timezone")
+  from opportunity_review import ReviewError, validate_review
+  try:
+    validate_review(plan)
+  except ReviewError as exc:
+    raise QuotePlanError(str(exc)) from exc
 
 
-def apply_quote_plan(normalized: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+def effective_plan_fields(row, line):
+  """The shared field overlay used by compilation and source-snapshot validation."""
+  source, target = line["source"], line["target"]
+  return {
+    "Service": str(source.get("service", row.get("Service", ""))),
+    "Instance/SKU": str(source.get("sku", row.get("Instance/SKU", ""))),
+    "Quantity": source.get("quantity", row.get("Quantity", 1)),
+    "Source Unit": str(source.get("unit", row.get("Source Unit", ""))),
+    "Capacity": str(source.get("capacity", row.get("Capacity", ""))),
+    "Monthly": source.get("monthlyCost", row.get("Monthly", row.get("monthly", row.get("Monthly Cost")))),
+    "Azure Service": str(target.get("service", row.get("Azure Service", ""))),
+    "Azure SKU": str(target.get("sku", row.get("Azure SKU", ""))),
+  }
+
+
+def source_monthly_cost(row):
+  value = row.get("Monthly", row.get("monthly", row.get("Monthly Cost")))
+  if isinstance(value, bool) or value in (None, ""):
+    return None
+  try:
+    value = float(value)
+  except (TypeError, ValueError, OverflowError):
+    return None
+  return value if math.isfinite(value) else None
+
+
+def apply_quote_plan(normalized: Dict[str, Any], plan: Dict[str, Any], context=None) -> Dict[str, Any]:
   validate_quote_plan(plan)
   rows = normalized.get("aws_boq", [])
   lines = plan["lines"]
   if len(rows) != len(lines):
     raise QuotePlanError(f"Quote plan has {len(lines)} lines but normalized BOQ has {len(rows)} rows")
   output = copy.deepcopy(normalized)
+  if "opportunityReview" in plan:
+    from opportunity_review import source_rows_for
+    output["reviewSourceRows"] = source_rows_for(normalized)
   output["quote_plan"] = plan
   for row, line in zip(output["aws_boq"], lines):
     source = line["source"]
     target = line["target"]
     row.update({
       "Quote Plan Line ID": line["id"],
-      "Service": str(source.get("service", row.get("Service", ""))),
-      "Instance/SKU": str(source.get("sku", row.get("Instance/SKU", ""))),
-      "Quantity": source.get("quantity", row.get("Quantity", 1)),
-      "Source Unit": str(source.get("unit", row.get("Source Unit", ""))),
-      "Capacity": str(source.get("capacity", row.get("Capacity", ""))),
-      "Monthly": source.get("monthlyCost", row.get("Monthly", 0)),
-      "Azure Service": str(target.get("service", row.get("Azure Service", ""))),
-      "Azure SKU": str(target.get("sku", row.get("Azure SKU", ""))),
+      **effective_plan_fields(row, line),
       "Mapping Assumptions": list(line.get("assumptions", [])),
       "Plan Validations": list(line.get("validations", [])),
       "Pricing Evidence": copy.deepcopy(line.get("pricingEvidence", [])),
       "Source Provider": str(source.get("provider", plan["sourceProvider"])),
       "Target Provider": str(target.get("provider", plan["targetProvider"])),
     })
+  if "opportunityReview" in plan:
+    from opportunity_review import evaluate_review
+    review = plan["opportunityReview"]
+    status = evaluate_review(plan, context or review["baseline"]["context"], output)
+    blocked = set(status["blockedLineIds"])
+    for row in output["aws_boq"]:
+      if row["Quote Plan Line ID"] in blocked:
+        row["Plan Validations"].append("Opportunity review: stale baseline or unapproved material assumption")
+      row["Review Assumptions"] = [
+        f"{a['id']} v{a['version']}: {a['text']} ({a['status']})"
+        for a in review["assumptions"] if row["Quote Plan Line ID"] in a["lineIds"]
+      ]
   return output
 
 

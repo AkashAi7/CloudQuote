@@ -406,13 +406,6 @@ def _lookup_live_price(
   source_sku: str = "",
   capacity: str = "",
 ) -> Dict[str, Any]:
-  if profile.get("pricing_provider") == "official_catalog":
-    return resolve_catalog_price(
-      str(profile["catalog_name"]),
-      str(profile.get("catalog_sku", source_sku)),
-      billable_qty,
-      currency,
-    )
   if profile.get("force_validate"):
     return {
       "unit_price": 0.0,
@@ -420,8 +413,10 @@ def _lookup_live_price(
       "annual": 0.0,
       "uom": "",
       "price_date": "",
-      "note": "[VALIDATE] Componentized pricing required",
+      "note": "[VALIDATE] " + (str(profile.get("conversion_validation", "")) or "Componentized pricing required"),
       "validate": True,
+      "source": "NONE",
+      "source_note": "Pricing lookup skipped until plan validations are resolved",
     }
   # Zone-priced global services (CDN, DNS, Front Door) publish no meters under a physical region,
   # so a line may name the pricing region its meter actually lives in.
@@ -443,6 +438,13 @@ def _lookup_live_price(
       "source_note": "Pricing lookup skipped until required conversion assumptions are supplied",
     }
 
+  if profile.get("pricing_provider") == "official_catalog":
+    return resolve_catalog_price(
+      str(profile["catalog_name"]),
+      str(profile.get("catalog_sku", source_sku)),
+      billable_qty,
+      currency,
+    )
   query = _scenario_price_query(scenario)
   if not profile["reservation_supported"]:
     query = {"price_type": "Consumption", "reservation_term": None}
@@ -689,6 +691,10 @@ def _apply_plan_overrides(profile: Dict[str, Any], row: Dict[str, Any]) -> Dict[
   if isinstance(pricing_evidence, list) and pricing_evidence:
     overridden["pricing_evidence"] = pricing_evidence
     changed = True
+  # Explicit plan/review blockers cannot be cleared by a meter pin or reference price.
+  if plan_validations:
+    overridden["conversion_validation"] = "; ".join(plan_validations)
+    overridden["force_validate"] = True
 
   return overridden if changed else profile
 
@@ -792,12 +798,36 @@ def _build_pricing_metrics(comparison_rows: List[Dict[str, Any]]) -> Dict[str, A
 
 
 def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], output_path: Path, scenario: str = "compare-all") -> Dict[str, Any]:
+  from opportunity_review import append_status_sheet, evaluate_review, prepare_review_inputs
+  from quote_plan import source_monthly_cost
+  context = {"region": pricing_meta.get("region", "eastus"), "currency": pricing_meta.get("currency", "USD"), "scenario": scenario}
+  normalized = prepare_review_inputs(normalized, context)
+  plan = normalized["quote_plan"]
+  review = plan.get("opportunityReview")
+  if review and review["mode"] == "quick-triage":
+    status = evaluate_review(plan, context, normalized, missing_fields=normalized.get("missing_or_ambiguous", []))
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Executive Summary"
+    ws.append(["Readiness", status["readiness"]])
+    ws.append(["Eligibility", status["eligibility"]])
+    ws.append(["Pricing", "Not compiled; triage only"])
+    append_status_sheet(wb, status, review)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_path)
+    return {**context, "opportunityStatus": status, "rows": len(plan["lines"]), "validateCount": 0,
+            "scenarioTotalsMonthly": {}, "scenarioSavings": {}, "recommendedScenario": "N/A",
+            "decisionConfidence": "Not qualified", "missingSpecFields": normalized.get("missing_or_ambiguous", [])}
+  from providers.targets import require_target_provider
+  target_adapter = require_target_provider(str(plan["targetProvider"]))
+  target_adapter.validate_plan(plan)
+  target_adapter.require_capability("compile")
   wb = Workbook()
 
   ws1 = wb.active
   ws1.title = "Mapping & Azure BOQ"
   ws1.append([
-    "AWS item",
+    f"{plan.get('sourceProvider', 'aws').upper()} item",
     "Capacity",
     "Azure service",
     "SKU",
@@ -813,6 +843,15 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   ])
 
   aws_rows = normalized.get("aws_boq", [])
+  baseline_complete = bool(aws_rows) and all(source_monthly_cost(row) is not None for row in aws_rows)
+  unknown_baseline = "N/A (incumbent costs unknown)"
+  source_label = plan.get("sourceProvider", "aws").upper()
+
+  def savings_percent(incumbent, target):
+    if incumbent is None:
+      return unknown_baseline
+    return round((incumbent - target) / incumbent * 100, 2) if incumbent else "N/A (zero incumbent baseline)"
+
   specs = normalized.get("specs", {})
   region = pricing_meta.get("region", "eastus")
   pricing_date = pricing_meta.get("pricingDate", "")
@@ -828,7 +867,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     service = _normalize_aws_service(str(row.get("Service", row.get("service", ""))))
     sku = str(row.get("Instance/SKU", row.get("instance", row.get("sku", ""))))
     qty = _num(row.get("Quantity", row.get("quantity", 1)))
-    aws_monthly = _num(row.get("Monthly", row.get("monthly", row.get("Monthly Cost", 0))))
+    aws_monthly = source_monthly_cost(row)
     env = str(row.get("Environment", row.get("environment", "prod")))
     source_unit = str(row.get("Source Unit", ""))
     local_unit_price = _num(row.get("Local Azure Unit Price", 0))
@@ -861,7 +900,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
       live = dict(live)
 
       # Final local fallback: use customer's Azure reference row when available.
-      if live.get("validate") and (local_unit_price > 0 or local_total_cost > 0):
+      if live.get("validate") and not row.get("Plan Validations") and (local_unit_price > 0 or local_total_cost > 0):
         prior_fallback_latency = float(live.get("fallback_latency_ms", 0.0))
         local_monthly = local_total_cost if local_total_cost > 0 else local_unit_price * billable_qty
         local_unit = local_unit_price if local_unit_price > 0 else (local_monthly / billable_qty if billable_qty else 0.0)
@@ -976,7 +1015,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   if scenario == "compare-all":
     ws2.append([
       "Line",
-      "AWS Monthly",
+      f"{source_label} Monthly",
       "Azure conservative",
       "Source conservative",
       "Azure moderate",
@@ -1008,7 +1047,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
               link_list.append(link)
       ws2.append([
         line,
-        round(aws_val, 2),
+        round(aws_val, 2) if aws_val is not None else "Unknown",
         cons_cell,
         cons_row.get("source", "API"),
         mod_cell,
@@ -1027,7 +1066,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
           "NONE": PatternFill(fill_type="solid", fgColor="F8CBAD"),
         }.get(str(source), PatternFill(fill_type="solid", fgColor="D9E1F2"))
         ws2.cell(row=current_row, column=col).fill = fill
-      totals["aws"] += aws_val
+      totals["aws"] += aws_val or 0.0
       if cons is None:
         scenario_has_validate["conservative"] = True
         scenario_unpriced_counts["conservative"] += 1
@@ -1048,20 +1087,22 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     total_mod: float | str = "N/A ([VALIDATE])" if scenario_has_validate["moderate"] else round(totals["moderate"], 2)
     total_agg: float | str = "N/A ([VALIDATE])" if scenario_has_validate["aggressive"] else round(totals["aggressive"], 2)
 
-    ws2.append(["TOTAL", round(totals["aws"], 2), total_cons, "", total_mod, "", total_agg, "", ""])
+    ws2.append(["TOTAL", round(totals["aws"], 2) if baseline_complete else unknown_baseline, total_cons, "", total_mod, "", total_agg, "", ""])
 
     sav_cons: float | str = "N/A ([VALIDATE])" if scenario_has_validate["conservative"] else round(totals["aws"] - totals["conservative"], 2)
     sav_mod: float | str = "N/A ([VALIDATE])" if scenario_has_validate["moderate"] else round(totals["aws"] - totals["moderate"], 2)
     sav_agg: float | str = "N/A ([VALIDATE])" if scenario_has_validate["aggressive"] else round(totals["aws"] - totals["aggressive"], 2)
+    if not baseline_complete:
+      sav_cons = sav_mod = sav_agg = unknown_baseline
     ws2.append(["Savings $", "", sav_cons, "", sav_mod, "", sav_agg, "", ""])
     ws2.append([
       "Savings %",
       "",
-      "N/A ([VALIDATE])" if scenario_has_validate["conservative"] else round(((totals["aws"] - totals["conservative"]) / totals["aws"] * 100) if totals["aws"] else 0, 2),
+      unknown_baseline if not baseline_complete else "N/A ([VALIDATE])" if scenario_has_validate["conservative"] else savings_percent(totals["aws"], totals["conservative"]),
       "",
-      "N/A ([VALIDATE])" if scenario_has_validate["moderate"] else round(((totals["aws"] - totals["moderate"]) / totals["aws"] * 100) if totals["aws"] else 0, 2),
+      unknown_baseline if not baseline_complete else "N/A ([VALIDATE])" if scenario_has_validate["moderate"] else savings_percent(totals["aws"], totals["moderate"]),
       "",
-      "N/A ([VALIDATE])" if scenario_has_validate["aggressive"] else round(((totals["aws"] - totals["aggressive"]) / totals["aws"] * 100) if totals["aws"] else 0, 2),
+      unknown_baseline if not baseline_complete else "N/A ([VALIDATE])" if scenario_has_validate["aggressive"] else savings_percent(totals["aws"], totals["aggressive"]),
       "",
       "",
     ])
@@ -1069,7 +1110,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     totals = {"aws": 0.0, "conservative": 0.0, "moderate": 0.0, "aggressive": 0.0}
     scenario_has_validate = {"conservative": False, "moderate": False, "aggressive": False}
     scenario_unpriced_counts = {"conservative": 0, "moderate": 0, "aggressive": 0}
-    ws2.append(["Line", "AWS Monthly", "Azure Monthly", "Savings $", "Savings %"])
+    ws2.append(["Line", f"{source_label} Monthly", "Azure Monthly", "Savings $", "Savings %"])
     total_aws = 0.0
     total_az = 0.0
     for r in comparison_rows:
@@ -1078,12 +1119,12 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
       _register_line_value(r["line"], scenario, az_val)
       ws2.append([
         r["line"],
-        round(aws_val, 2),
+        round(aws_val, 2) if aws_val is not None else "Unknown",
         "[VALIDATE]" if az_val is None else round(az_val, 2),
-        "[VALIDATE]" if az_val is None else round(aws_val - az_val, 2),
-        "[VALIDATE]" if az_val is None else round(((aws_val - az_val) / aws_val * 100) if aws_val else 0, 2),
+        unknown_baseline if aws_val is None else "[VALIDATE]" if az_val is None else round(aws_val - az_val, 2),
+        unknown_baseline if aws_val is None else "[VALIDATE]" if az_val is None else savings_percent(aws_val, az_val),
       ])
-      total_aws += aws_val
+      total_aws += aws_val or 0.0
       if az_val is None:
         scenario_has_validate[scenario] = True
         scenario_unpriced_counts[scenario] += 1
@@ -1093,10 +1134,10 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     totals[scenario] = total_az
     ws2.append([
       "TOTAL",
-      round(total_aws, 2),
+      round(total_aws, 2) if baseline_complete else unknown_baseline,
       "N/A ([VALIDATE])" if scenario_has_validate[scenario] else round(total_az, 2),
-      "N/A ([VALIDATE])" if scenario_has_validate[scenario] else round(total_aws - total_az, 2),
-      "N/A ([VALIDATE])" if scenario_has_validate[scenario] else round(((total_aws - total_az) / total_aws * 100) if total_aws else 0, 2),
+      unknown_baseline if not baseline_complete else "N/A ([VALIDATE])" if scenario_has_validate[scenario] else round(total_aws - total_az, 2),
+      unknown_baseline if not baseline_complete else "N/A ([VALIDATE])" if scenario_has_validate[scenario] else savings_percent(total_aws, total_az),
     ])
 
   ws3 = wb.create_sheet("Assumptions & Levers")
@@ -1109,6 +1150,9 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   ws3.append(["Levers", "conservative: PAYG only; moderate: 1Y Reservation + AHB + tiering; aggressive: 3Y Reservation + AHB + non-prod Dev/Test + Spot for interruptible only"])
   ws3.append(["Parity gaps", "; ".join(normalized.get("missing_or_ambiguous", [])) or "None captured"])
   ws3.append(["Open questions", "Confirm RTO/RPO, growth assumptions, non-prod interruptibility before final quote"])
+  for row in aws_rows:
+    for assumption in row.get("Review Assumptions", []):
+      ws3.append([row["Quote Plan Line ID"], assumption])
 
   # Executive KPI sheet for polished stakeholder readout.
   ws4 = wb.create_sheet("Executive Summary")
@@ -1119,7 +1163,22 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   ws4.append(["Input rows", len(aws_rows)])
   ws4.append(["Rows requiring validation", validate_count])
 
-  available_scenarios = [s for s in SCENARIOS if not scenario_has_validate.get(s, False) and totals.get(s, 0.0) > 0]
+  opportunity_status = evaluate_review(
+    plan, context, normalized, pricing_blockers=validate_count,
+    missing_fields=normalized.get("missing_or_ambiguous", []), compiled=True,
+  )
+  qualified = opportunity_status["qualifiedComparison"]
+  append_status_sheet(wb, opportunity_status, review)
+  ws4.append(["Readiness", opportunity_status["readiness"]])
+  ws4.append(["Eligibility", opportunity_status["eligibility"]])
+  ws4.append(["Blocking reasons", "; ".join(opportunity_status["blockingReasons"])])
+  ws4.append(["Next action", opportunity_status["nextAction"]])
+  ws4.append(["Owner", opportunity_status["owner"] or "Unassigned"])
+  ws4.append(["Incumbent baseline", "Known" if baseline_complete else unknown_baseline])
+  for limitation in opportunity_status["comparisonLimitations"]:
+    ws4.append(["Comparison limitation", limitation])
+  ws2.append(["Opportunity status", opportunity_status["readiness"], "All comparisons are provisional unless qualified"])
+  available_scenarios = [s for s in SCENARIOS if qualified and not scenario_has_validate.get(s, False) and totals.get(s, 0.0) > 0]
   recommended_scenario = ""
   if available_scenarios:
     recommended_scenario = min(available_scenarios, key=lambda s: totals[s])
@@ -1128,19 +1187,20 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     if scenario == "compare-all" or scenario == scenario_name:
       if scenario_has_validate.get(scenario_name, False):
         ws4.append([f"{scenario_name} azure monthly", "N/A ([VALIDATE])"])
-        ws4.append([f"{scenario_name} savings vs AWS", "N/A ([VALIDATE])"])
+        ws4.append([f"{scenario_name} savings vs {source_label}", "N/A ([VALIDATE])"])
         ws4.append([
           f"{scenario_name} priced subtotal monthly",
           f"{round(totals.get(scenario_name, 0.0), 2)} (excludes {scenario_unpriced_counts.get(scenario_name, 0)} line(s) pending validation)",
         ])
       else:
         savings = totals["aws"] - totals[scenario_name]
-        savings_pct = (savings / totals["aws"] * 100.0) if totals["aws"] else 0.0
+        savings_pct = savings_percent(totals["aws"], totals[scenario_name])
         ws4.append([f"{scenario_name} azure monthly", round(totals[scenario_name], 2)])
-        ws4.append([f"{scenario_name} savings vs AWS", f"{round(savings, 2)} ({round(savings_pct, 2)}%)"])
+        savings_text = f"{round(savings, 2)} ({savings_pct}{'%' if isinstance(savings_pct, (int, float)) else ''})"
+        ws4.append([f"{scenario_name} savings vs {source_label}", unknown_baseline if not baseline_complete else savings_text if qualified else "Not qualified / provisional comparison only"])
 
   ws4.append(["Recommended scenario", recommended_scenario or "N/A (validation blockers)"])
-  ws4.append(["Decision confidence", "High" if validate_count == 0 else ("Medium" if validate_count <= 5 else "Low")])
+  ws4.append(["Decision confidence", "High" if qualified else "Not qualified"])
 
   # Validation sheet for auditability.
   ws5 = wb.create_sheet("Validation & Coverage")
@@ -1167,7 +1227,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   for line, values in line_scenario_values.items():
     az = values.get(driver_scenario)
     aws_val = next((r["aws_monthly"] for r in comparison_rows if r["line"] == line), 0.0)
-    if az is None:
+    if az is None or not baseline_complete:
       continue
     driver_rows.append({
       "line": line,
@@ -1182,7 +1242,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
   output_path.parent.mkdir(parents=True, exist_ok=True)
   wb.save(output_path)
 
-  scenario_totals: Dict[str, Any] = {"aws": round(totals["aws"], 2)}
+  scenario_totals: Dict[str, Any] = {"aws": round(totals["aws"], 2) if baseline_complete else unknown_baseline}
   scenario_savings: Dict[str, Any] = {}
   priced_subtotals: Dict[str, Any] = {}
   for scenario_name in SCENARIOS:
@@ -1197,11 +1257,13 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
       else:
         azure_total = round(totals.get(scenario_name, 0.0), 2)
         savings = round(totals["aws"] - totals.get(scenario_name, 0.0), 2)
-        savings_pct = round(((totals["aws"] - totals.get(scenario_name, 0.0)) / totals["aws"] * 100.0) if totals["aws"] else 0.0, 2)
+        savings_pct = savings_percent(totals["aws"], totals.get(scenario_name, 0.0))
         scenario_totals[scenario_name] = azure_total
-        scenario_savings[scenario_name] = {"amount": savings, "percent": savings_pct}
+        scenario_savings[scenario_name] = {"amount": savings, "percent": savings_pct if isinstance(savings_pct, (int, float)) else None} if qualified else unknown_baseline if not baseline_complete else "Not qualified / provisional comparison only"
 
   summary = {
+    "opportunityStatus": opportunity_status,
+    "sourceProvider": plan.get("sourceProvider", "aws"),
     "region": region,
     "currency": currency,
     "pricingDate": pricing_date,
@@ -1212,7 +1274,7 @@ def build_workbook(normalized: Dict[str, Any], pricing_meta: Dict[str, Any], out
     "scenarioPricedSubtotalsMonthly": priced_subtotals,
     "scenarioSavings": scenario_savings,
     "recommendedScenario": recommended_scenario or "N/A",
-    "decisionConfidence": "High" if validate_count == 0 else ("Medium" if validate_count <= 5 else "Low"),
+    "decisionConfidence": "High" if qualified else "Not qualified",
     "topDriversPositive": [
       {
         "line": d["line"],

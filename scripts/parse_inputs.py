@@ -7,6 +7,8 @@ from typing import Any, Dict, List
 
 import yaml
 
+from input_integrity import source_hashes
+
 
 def _read_aws_boq(path: Path) -> List[Dict[str, Any]]:
   if path.suffix.lower() == ".csv":
@@ -139,7 +141,7 @@ def _normalize_aws_rows(rows: List[Dict[str, Any]], azure_ref: Dict[str, Dict[st
     explicit_service = str(_first_non_empty(row, ["Service", "service"], "")).strip()
     quantity = _first_non_empty(row, ["Quantity", "quantity", "Quantity per unit per Month"], 1)
     quantity_raw = str(quantity)
-    monthly = _first_non_empty(row, ["Monthly", "monthly", "Monthly Cost", "Total Cost"], 0)
+    monthly = _first_non_empty(row, ["Monthly", "monthly", "Monthly Cost", "Total Cost"], "")
     source_unit = str(_first_non_empty(row, ["Unit", "unit"], "")).strip()
     environment = str(_first_non_empty(row, ["Environment", "environment"], "prod")).strip() or "prod"
     azure_service = str(_first_non_empty(row, ["Azure Service", "azure_service"], "")).strip()
@@ -251,14 +253,18 @@ def _extract_missing(specs: Dict[str, Any]) -> List[str]:
 
 
 def normalize_inputs(specs_path: Path, aws_boq_path: Path, output_path: Path) -> Dict[str, Any]:
+  bindings = source_hashes(specs_path, aws_boq_path)
   specs = _read_specs(specs_path)
   aws_rows_raw = _read_aws_boq(aws_boq_path)
   azure_ref = _read_azure_reference_map(aws_boq_path)
   aws_rows = _apply_implied_capacity(_normalize_aws_rows(aws_rows_raw, azure_ref=azure_ref))
+  if bindings != source_hashes(specs_path, aws_boq_path):
+    raise ValueError("Source files changed during normalization; rerun with stable input files")
 
   normalized = {
-    "specs_source": str(specs_path),
-    "aws_boq_source": str(aws_boq_path),
+    "specs_source": str(specs_path.resolve()),
+    "aws_boq_source": str(aws_boq_path.resolve()),
+    "sourceBindings": bindings,
     "specs": specs,
     "aws_boq": aws_rows,
     "missing_or_ambiguous": _extract_missing(specs),
